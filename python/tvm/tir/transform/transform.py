@@ -480,6 +480,10 @@ def LowerThreadAllreduce():
     return _ffi_api.LowerThreadAllreduce()  # type: ignore
 
 
+def ThreadBlockSync():
+    return _ffi_api.ThreadBlockSync()  # type: ignore
+
+
 def InferFragment():
     """Infer the TensorCore fragment infomation using tensor intrinsics.
 

@@ -103,6 +103,8 @@ def default_tir_pipeline():
                 tir.transform.LowerThreadAllreduce(),
             ]
         )
+        if bool(config.get("tir.use_block_sync", False)):
+            passes.append(tir.transform.ThreadBlockSync())
         if bool(config.get("tir.use_async_copy", False)):
             passes.append(tir.transform.InjectPTXAsyncCopy())
         if bool(config.get("tir.ptx_ldg32", False)):
