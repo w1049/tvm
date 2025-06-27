@@ -279,6 +279,11 @@ std::string CodeGenCUDA::Finish() {
     decl_stream << "#include <mma.h>\n";
   }
 
+  if (need_cooperative_groups_h_) {
+    decl_stream << "#include <cooperative_groups.h>\n";
+    decl_stream << "namespace cg = cooperative_groups;\n";
+  }
+
   if (need_cast_smem_ptr_to_int_) {
     decl_stream << "__forceinline__ __device__ unsigned int\n";
     decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
@@ -739,6 +744,10 @@ void CodeGenCUDA::PrintStorageSync(const CallNode* op) {
   } else if (sync == "shared" || sync == "shared.dyn") {
     this->PrintIndent();
     this->stream << "__syncthreads();\n";
+  } else if (sync == "block.shared" || sync == "block.shared.dyn") {
+    need_cooperative_groups_h_ = true;
+    this->PrintIndent();
+    this->stream << "cg::this_thread_block().sync();\n";
   } else if (sync == "global") {
     if (!need_global_barrier_) {
       need_global_barrier_ = true;
