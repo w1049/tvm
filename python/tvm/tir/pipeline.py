@@ -103,12 +103,14 @@ def default_tir_pipeline():
                 tir.transform.LowerThreadAllreduce(),
             ]
         )
-        if bool(config.get("tir.use_block_sync", False)):
-            passes.append(tir.transform.ThreadBlockSync())
         if bool(config.get("tir.use_async_copy", False)):
             passes.append(tir.transform.InjectPTXAsyncCopy())
         if bool(config.get("tir.ptx_ldg32", False)):
             passes.append(tir.transform.InjectPTXLDG32())
+        if bool(config.get("tir.merge_launch_thread", False)):
+            passes.append(tir.transform.MergeLaunchThreadPass())
+        if bool(config.get("tir.use_block_sync", False)):
+            passes.append(tir.transform.ThreadBlockSync())
         passes.extend(
             [
                 tir.transform.AnnotateDeviceRegions(),

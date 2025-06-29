@@ -484,6 +484,10 @@ def ThreadBlockSync():
     return _ffi_api.ThreadBlockSync()  # type: ignore
 
 
+def MergeLaunchThreadPass():
+    return _ffi_api.MergeLaunchThreadPass()  # type: ignore
+
+
 def InferFragment():
     """Infer the TensorCore fragment infomation using tensor intrinsics.
 
