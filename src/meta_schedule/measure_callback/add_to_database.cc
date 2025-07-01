@@ -41,6 +41,7 @@ class AddToDatabaseNode : public MeasureCallbackNode {
       RunnerResult result = runner_results[i];
       MeasureCandidate candidate = measure_candidates[i];
       Array<FloatImm> run_secs{nullptr};
+      Array<Integer> extra_info = {123, 456}; // TODO: from build result?
       if (result->run_secs.defined()) {
         run_secs = result->run_secs.value();
       } else {
@@ -51,7 +52,8 @@ class AddToDatabaseNode : public MeasureCallbackNode {
           /*workload=*/workload,
           /*run_secs=*/run_secs,
           /*target=*/target,
-          /*args_info=*/candidate->args_info));
+          /*args_info=*/candidate->args_info,
+          /*extra_info=*/extra_info));
     }
   }
 

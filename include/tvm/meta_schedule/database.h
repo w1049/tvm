@@ -125,6 +125,8 @@ class TuningRecordNode : public runtime::Object {
   Optional<Target> target;
   /*! \brief The argument information. */
   Optional<Array<ArgInfo>> args_info;
+  /*! \brief Extra information, such as the number of registers and shared memory used. */
+  Optional<Array<Integer>> extra_info;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -133,7 +135,8 @@ class TuningRecordNode : public runtime::Object {
         .def_ro("workload", &TuningRecordNode::workload)
         .def_ro("run_secs", &TuningRecordNode::run_secs)
         .def_ro("target", &TuningRecordNode::target)
-        .def_ro("args_info", &TuningRecordNode::args_info);
+        .def_ro("args_info", &TuningRecordNode::args_info)
+        .def_ro("extra_info", &TuningRecordNode::extra_info);
   }
 
   static constexpr const char* _type_key = "meta_schedule.TuningRecord";
@@ -169,10 +172,12 @@ class TuningRecord : public runtime::ObjectRef {
    \param run_secs The running time of the tuning record.
    \param target The target of the tuning record.
    \param args_info The argument information of the tuning record.
+   \param extra_info The extra information of the tuning record.
   */
   TVM_DLL explicit TuningRecord(tir::Trace trace, Workload workload,
                                 Optional<Array<FloatImm>> run_secs, Optional<Target> target,
-                                Optional<Array<ArgInfo>> args_info);
+                                Optional<Array<ArgInfo>> args_info,
+                                Optional<Array<Integer>> extra_info);
   /*!
    * \brief Create a tuning record from a json object.
    * \param json_obj The json object.

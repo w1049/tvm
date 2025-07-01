@@ -72,13 +72,14 @@ Workload Workload::FromJSON(const ObjectRef& json_obj) {
 /******** TuningRecord ********/
 
 TuningRecord::TuningRecord(tir::Trace trace, Workload workload, Optional<Array<FloatImm>> run_secs,
-                           Optional<Target> target, Optional<Array<ArgInfo>> args_info) {
+                           Optional<Target> target, Optional<Array<ArgInfo>> args_info, Optional<Array<Integer>> extra_info) {
   ObjectPtr<TuningRecordNode> n = make_object<TuningRecordNode>();
   n->trace = trace;
   n->workload = workload;
   n->run_secs = run_secs;
   n->target = target;
   n->args_info = args_info;
+  n->extra_info = extra_info;
   this->data_ = n;
 }
 
@@ -110,7 +111,8 @@ ObjectRef TuningRecordNode::AsJSON() const {
   return Array<ObjectRef>{trace->AsJSON(false),  //
                           run_secs,              //
                           json_target,           //
-                          json_args_info};
+                          json_args_info,        //
+                          extra_info};
 }
 
 bool TuningRecordNode::IsValid() const {
@@ -133,9 +135,10 @@ TuningRecord TuningRecord::FromJSON(const ObjectRef& json_obj, const Workload& w
   Optional<Array<FloatImm>> run_secs;
   Optional<Target> target;
   Optional<Array<ArgInfo>> args_info;
+  Optional<Array<Integer>> extra_info;
   try {
     const ffi::ArrayObj* json_array = json_obj.as<ffi::ArrayObj>();
-    CHECK(json_array && json_array->size() == 4);
+    CHECK(json_array && (json_array->size() == 4 || json_array->size() == 5));
     // Load json[1] => run_secs
     if (json_array->at(1) != nullptr) {
       run_secs = AsFloatArray(json_array->at(1).cast<ObjectRef>());
@@ -163,11 +166,15 @@ TuningRecord TuningRecord::FromJSON(const ObjectRef& json_obj, const Workload& w
       tir::Trace::ApplyJSONToSchedule(json_trace, sch);
       trace = sch->trace().value();
     }
+    if (json_array->size() == 5) {
+      // Load json[4] => extra_info
+      extra_info = AsIntArray(json_array->at(4).cast<ObjectRef>());
+    }
   } catch (const std::runtime_error& e) {  // includes tvm::Error and dmlc::Error
     LOG(FATAL) << "ValueError: Unable to parse the JSON object: " << json_obj
                << "\nThe error is: " << e.what();
   }
-  return TuningRecord(trace, workload, run_secs, target, args_info);
+  return TuningRecord(trace, workload, run_secs, target, args_info, extra_info);
 }
 
 /******** Database ********/
@@ -229,7 +236,8 @@ void DatabaseNode::DumpPruned(Database destination) {
     destination->CommitTuningRecord(TuningRecord(/*trace=*/record->trace, /*workload=*/workload,
                                                  /*run_secs=*/record->run_secs,
                                                  /*target=*/record->target,
-                                                 /*args_info=*/record->args_info));
+                                                 /*args_info=*/record->args_info,
+                                                /*extra_info=*/record->extra_info));
   }
 }
 
@@ -295,8 +303,9 @@ TVM_FFI_REGISTER_GLOBAL("meta_schedule.WorkloadAsJSON").set_body_method(&Workloa
 TVM_FFI_REGISTER_GLOBAL("meta_schedule.WorkloadFromJSON").set_body_typed(&Workload::FromJSON);
 TVM_FFI_REGISTER_GLOBAL("meta_schedule.TuningRecord")
     .set_body_typed([](tir::Trace trace, Workload workload, Optional<Array<FloatImm>> run_secs,
-                       Optional<Target> target, Optional<Array<ArgInfo>> args_info) {
-      return TuningRecord(trace, workload, run_secs, target, args_info);
+                       Optional<Target> target, Optional<Array<ArgInfo>> args_info,
+                       Optional<Array<Integer>> extra_info) {
+      return TuningRecord(trace, workload, run_secs, target, args_info, extra_info);
     });
 TVM_FFI_REGISTER_GLOBAL("meta_schedule.TuningRecordAsMeasureCandidate")
     .set_body_method(&TuningRecordNode::AsMeasureCandidate);

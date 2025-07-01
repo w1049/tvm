@@ -46,7 +46,8 @@ class ScheduleFnDatabaseNode : public DatabaseNode {
                           /*workload=*/Workload(mod, 0),  //
                           /*run_secs=*/std::nullopt,      //
                           /*target=*/target,              //
-                          /*arg_info=*/std::nullopt);
+                          /*arg_info=*/std::nullopt,      //
+                          /*extra_info=*/std::nullopt);
     }
     return std::nullopt;
   }
