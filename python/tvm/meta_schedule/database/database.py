@@ -95,6 +95,8 @@ class TuningRecord(Object):
         The target of the tuning record.
     args_info : Optional[List[ArgInfo]]
         The argument information of the tuning record.
+    extra_info : Optional[List[int]]
+        The extra information of the tuning record.
     """
 
     trace: Trace
@@ -102,6 +104,7 @@ class TuningRecord(Object):
     run_secs: Optional[List[float]]
     target: Optional[Target]
     args_info: Optional[List[ArgInfo]]
+    extra_info: Optional[List[int]]
 
     def __init__(  # type: ignore # pylint: disable=too-many-arguments
         self,
@@ -110,6 +113,7 @@ class TuningRecord(Object):
         run_secs: Optional[List[float]] = None,
         target: Optional[Target] = None,
         args_info: Optional[List[ArgInfo]] = None,
+        extra_info: Optional[List[int]] = None,
     ) -> None:
         self.__init_handle_by_constructor__(
             _ffi_api.TuningRecord,  # type: ignore # pylint: disable=no-member
@@ -118,6 +122,7 @@ class TuningRecord(Object):
             run_secs,
             target,
             args_info,
+            extra_info,
         )
 
     def as_measure_candidate(self) -> Any:
