@@ -107,9 +107,12 @@ class MergeLaunchThread : public StmtExprMutator {
         // we need to adjust the body to use the max_thread_extent.
         auto body = this->VisitStmt(op->body);
         // Create a new IterVar with the max_thread_extent.
-        auto new_iv = IterVar(Range::FromMinExtent(0, collector_.max_thread_extent), iv->var,
-                              iv->iter_type, iv->thread_tag, iv->span);
-        return AttrStmt(new_iv, op->attr_key, collector_.max_thread_extent, body, op->span);
+        if (!thread_idx_var_.defined()) {
+          thread_idx_var_ = IterVar(Range::FromMinExtent(0, collector_.max_thread_extent), iv->var,
+                                    iv->iter_type, iv->thread_tag, iv->span);
+        }
+        return AttrStmt(thread_idx_var_, op->attr_key, collector_.max_thread_extent, body,
+                        op->span);
       }
     }
     return StmtExprMutator::VisitStmt_(op);
@@ -190,12 +193,15 @@ class MergeLaunchThread : public StmtExprMutator {
     Var var = GetRef<Var>(op);
     if (StartsWith(var->name_hint, "blockIdx.") && block_idx_var_.defined()) {
       return block_idx_var_->var - current_extent_;
+    } else if (StartsWith(var->name_hint, "threadIdx.") && thread_idx_var_.defined()) {
+      return thread_idx_var_->var;
     }
     return StmtExprMutator::VisitExpr_(op);
   }
 
   PrimExpr current_extent_{0};
   IterVar block_idx_var_{nullptr};
+  IterVar thread_idx_var_{nullptr};
   const ThreadInfoCollector collector_;
 };
 
