@@ -65,6 +65,12 @@ inline std::unordered_map<std::string, runtime::FunctionInfo> ExtractFuncInfo(co
         info.launch_param_tags.push_back(tag);
       }
     }
+    if (auto opt = f->GetAttr<Array<PrimExpr>>(tir::attr::kKernelLaunchArgs)) {
+      // thread extent, the same order as params
+      for (const auto& arg : opt.value()) {
+        info.launch_args.push_back(arg.as<IntImmNode>()->value);  // assuming args are IntImm
+      }
+    }
     auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
     fmap[static_cast<std::string>(global_symbol.value())] = info;
   }

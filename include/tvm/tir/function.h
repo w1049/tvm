@@ -324,6 +324,15 @@ namespace attr {
 constexpr const char* kKernelLaunchParams = "tir.kernel_launch_params";
 
 /*!
+ * \brief List of thread extent that a DeviceLaunch function corresponds to.
+ *
+ * Type: Array<PrimExpr>
+ *
+ * \sa tvm::CallingConv::kDeviceKernelLaunch
+ */
+constexpr const char* kKernelLaunchArgs = "tir.kernel_launch_args";
+
+/*!
  * \brief Whether to set noalias rule on the function arguments.
  *
  * Type: Integer

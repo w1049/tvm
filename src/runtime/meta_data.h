@@ -62,6 +62,10 @@ struct FunctionInfo {
   enum class ArgExtraTags : int { kNone = 0, kTensorMap = 1 };
   std::vector<ArgExtraTags> arg_extra_tags;
 
+  // used for passing launch arguments to target.build
+  // haven't implemented save & load for launch_args
+  std::vector<int> launch_args;
+
   void Save(dmlc::JSONWriter* writer) const;
   void Load(dmlc::JSONReader* reader);
   void Save(dmlc::Stream* writer) const;
