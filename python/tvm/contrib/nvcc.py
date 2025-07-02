@@ -19,6 +19,7 @@
 from __future__ import absolute_import as _abs
 
 import os
+import re
 import subprocess
 import warnings
 from typing import Tuple
@@ -54,6 +55,16 @@ def compile_cuda(code, target_format=None, arch=None, options=None, path_target=
     ------
     cubin : bytearray
         The bytearray of the cubin
+    
+    reg : int
+        The number of registers used by the kernel. If there are multiple kernels,
+        returns the first one. If config `show_resource_usage` is not set,
+        returns 0.
+
+    smem : int
+        The shared memory used by the kernel. If there are multiple kernels,
+        returns the first one. If config `show_resource_usage` is not set,
+        returns 0.
     """
     # Check for NVSHMEM dependency
     nvshmem_include_path, nvshmem_lib_path = None, None
@@ -128,6 +139,9 @@ def compile_cuda(code, target_format=None, arch=None, options=None, path_target=
         cmd += ["-c", temp_code]
         cmd += ["-rdc=true"]
         cmd += ["-I", nvshmem_include_path]
+    show_resource_usage = pass_context.config.get("cuda.show_resource_usage", False)
+    if show_resource_usage:
+        cmd += ["-Xptxas", "-v"]
 
     # NOTE: ccbin option can be used to tell nvcc where to find the c++ compiler
     # just in case it is not in the path. On Windows it is not in the path by default.
@@ -173,11 +187,22 @@ def compile_cuda(code, target_format=None, arch=None, options=None, path_target=
 
         file_target = f"{file_prefix}.cubin"
 
+    if show_resource_usage:
+        out_str = py_str(out)
+        # If there are multiple kernels, the first one will be extracted.
+        reg_match = re.search(r"(\d+) registers", out_str)
+        reg = int(reg_match.group(1)) if reg_match else 0
+        smem_match = re.search(r"(\d+) bytes smem", out_str)
+        smem = int(smem_match.group(1)) if smem_match else 0
+        # print(f"nvcc compilation finished, registers: {reg}, smem: {smem}")
+
     with open(file_target, "rb") as f:
         data = bytearray(f.read())
         if not data:
             raise RuntimeError("Compilation error: empty result is generated")
-        return data
+        if show_resource_usage:
+            return data, reg, smem
+        return data, 0, 0
 
 
 def find_cuda_path():
@@ -311,8 +336,8 @@ def find_nvshmem_paths() -> Tuple[str, str]:
 @tvm.ffi.register_func
 def tvm_callback_cuda_compile(code, target):  # pylint: disable=unused-argument
     """use nvcc to generate fatbin code for better optimization"""
-    ptx = compile_cuda(code, target_format="fatbin")
-    return ptx
+    ptx, reg, smem = compile_cuda(code, target_format="fatbin")
+    return ptx, reg, smem
 
 
 @tvm.ffi.register_func("tvm_callback_libdevice_path")

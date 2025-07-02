@@ -175,10 +175,11 @@ class LocalBuilder(PyBuilder):
             ],
         ):
             if map_result.status == StatusKind.COMPLETE:
-                results.append(BuilderResult(map_result.value, None))
+                results.append(BuilderResult(map_result.value[0], map_result.value[1], None))
             elif map_result.status == StatusKind.TIMEOUT:
                 results.append(
                     BuilderResult(
+                        None,
                         None,
                         f"LocalBuilder: Timeout, killed after {self.timeout_sec} seconds",
                     )
@@ -186,6 +187,7 @@ class LocalBuilder(PyBuilder):
             elif map_result.status == StatusKind.EXCEPTION:
                 results.append(
                     BuilderResult(
+                        None,
                         None,
                         "LocalBuilder: An exception occurred\n" + str(map_result.value),
                     )
@@ -217,7 +219,7 @@ def _worker_func(
     mod: IRModule,
     target: Target,
     params: Optional[bytearray],
-) -> str:
+) -> tuple[str, List[int]]:
     # Step 0. Get the registered functions
     f_build: T_BUILD = get_global_func_with_default_on_worker(
         _f_build,
@@ -228,10 +230,25 @@ def _worker_func(
         default_export,
     )
     # Step 1. Build the IRModule
-    rt_mod: Module = f_build(mod, target, _deserialize_params(params))
+    # Add PassContext here to make sure build func is aware of the context.
+    # seems the func inside the pool is not aware of the PassContext
+    from tvm import transform
+
+    with transform.PassContext(
+        opt_level=3, config={"tir.merge_static_smem": True, "cuda.show_resource_usage": True}
+    ):
+        rt_mod: Module = f_build(mod, target, _deserialize_params(params))
     # Step 2. Export the Module
     artifact_path: str = f_export(rt_mod)
-    return artifact_path
+
+    # !!HACK!!
+    # Step 3. Get the extra info from the Module
+    info = rt_mod.imported_modules[0].get_source().splitlines()[0]
+    if info.startswith("// "):
+        extra_info = [int(x) for x in info[3:].split(" ")]
+    else:
+        extra_info = None
+    return artifact_path, extra_info
 
 
 @register_func("meta_schedule.builder.default_build")

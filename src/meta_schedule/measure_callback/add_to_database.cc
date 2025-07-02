@@ -41,12 +41,22 @@ class AddToDatabaseNode : public MeasureCallbackNode {
       RunnerResult result = runner_results[i];
       MeasureCandidate candidate = measure_candidates[i];
       Array<FloatImm> run_secs{nullptr};
-      Array<Integer> extra_info = {123, 456}; // TODO: from build result?
       if (result->run_secs.defined()) {
         run_secs = result->run_secs.value();
       } else {
         run_secs = Array<FloatImm>{FloatImm(DataType::Float(32), 1e10)};
       }
+
+      // Get extra information from the builder result
+      // blocks, threads, reg, smem
+      BuilderResult builder_result = builder_results[i];
+      Array<Integer> extra_info{nullptr};
+      if (builder_result->extra_info.defined()) {
+        extra_info = builder_result->extra_info.value();
+      } else {
+        extra_info = Array<Integer>{0, 0, 0, 0};
+      }
+
       database->CommitTuningRecord(TuningRecord(
           /*trace=*/candidate->sch->trace().value(),
           /*workload=*/workload,
