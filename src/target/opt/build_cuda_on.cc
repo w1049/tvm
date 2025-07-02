@@ -33,6 +33,7 @@
 
 #include "../../runtime/cuda/cuda_common.h"
 #include "../../runtime/cuda/cuda_module.h"
+#include "../../runtime/thread_storage_scope.h"
 #include "../build_common.h"
 #include "../source/codegen_cuda.h"
 
@@ -156,8 +157,14 @@ runtime::Module BuildCUDA(IRModule mod, Target target) {
   std::string ptx;
   auto f_enter = ffi::Function::GetGlobal("target.TargetEnterScope");
   (*f_enter)(target);
+
+  int reg = 0, smem = 0;
   if (auto f = ffi::Function::GetGlobal("tvm_callback_cuda_compile")) {
-    ptx = (*f)(code, target).cast<std::string>();
+    // ugly but convenient
+    auto ret = (*f)(code, target).cast<Array<ffi::Any>>();
+    ptx = ret[0].cast<std::string>();
+    reg = ret[1].cast<int>();
+    smem = ret[2].cast<int>();
     // Dirty matching to check PTX vs cubin.
     // TODO(tqchen) more reliable checks
     if (ptx[0] != '/') fmt = "cubin";
@@ -166,10 +173,35 @@ runtime::Module BuildCUDA(IRModule mod, Target target) {
   }
   auto f_exit = ffi::Function::GetGlobal("target.TargetExitScope");
   (*f_exit)(target);
-  return CUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code);
+  auto func_info = ExtractFuncInfo(mod);
+
+  // extrac blocks and threads
+  for (auto& [name, info] : func_info) {
+    if (!info.launch_param_tags.empty() && !info.launch_args.empty()) {
+      ICHECK_EQ(info.launch_param_tags.size(), info.launch_args.size())
+          << "Mismatch between launch_param_tags and launch_args for function: " << name;
+      int blocks = 1, threads = 1;
+      for (size_t i = 0; i < info.launch_param_tags.size(); ++i) {
+        runtime::ThreadScope thread_scope = runtime::ThreadScope::Create(info.launch_param_tags[i]);
+        if (thread_scope.rank == 0) {
+          blocks *= info.launch_args[i];
+        } else if (thread_scope.rank == 1) {
+          threads *= info.launch_args[i];
+        }
+      }
+      // only the first kernel is considered - not right, but works for my case
+      // !!HACK!!
+      code = "// " + std::to_string(blocks) + " " + std::to_string(threads) + " " + std::to_string(reg) +
+             " " + std::to_string(smem) + "\n" + code;
+      break;
+    }
+  }
+
+  return CUDAModuleCreate(ptx, fmt, func_info, code);
 }
 
 TVM_FFI_REGISTER_GLOBAL("target.build.cuda").set_body_typed(BuildCUDA);
 TVM_REGISTER_PASS_CONFIG_OPTION("cuda.kernels_output_dir", String);
+TVM_REGISTER_PASS_CONFIG_OPTION("cuda.show_resource_usage", Bool);
 }  // namespace codegen
 }  // namespace tvm
