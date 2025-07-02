@@ -85,11 +85,13 @@ class BuilderResult(Object):
     """
 
     artifact_path: Optional[str]
+    extra_info: Optional[List[int]]
     error_msg: Optional[str]
 
     def __init__(
         self,
         artifact_path: Optional[str],
+        extra_info: Optional[List[int]],
         error_msg: Optional[str],
     ) -> None:
         """Constructor.
@@ -98,12 +100,15 @@ class BuilderResult(Object):
         ----------
         artifact_path : Optional[str]
             The path to the artifact.
+        extra_info : Optional[List[int]]
+            Extra information about the build.
         error_msg : Optional[str]
             The error message.
         """
         self.__init_handle_by_constructor__(
             _ffi_api.BuilderResult,  # type: ignore # pylint: disable=no-member
             artifact_path,
+            extra_info,
             error_msg,
         )
 
