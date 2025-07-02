@@ -78,6 +78,8 @@ class BuilderResultNode : public runtime::Object {
  public:
   /*! \brief The path to the built artifact. */
   Optional<String> artifact_path;
+  /*! \brief Extra information about the build, such as registers and shared memory usage. */
+  Optional<Array<Integer>> extra_info;
   /*! \brief The error message if any. */
   Optional<String> error_msg;
 
@@ -85,6 +87,7 @@ class BuilderResultNode : public runtime::Object {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<BuilderResultNode>()
         .def_ro("artifact_path", &BuilderResultNode::artifact_path)
+        .def_ro("extra_info", &BuilderResultNode::extra_info)
         .def_ro("error_msg", &BuilderResultNode::error_msg);
   }
 
@@ -101,9 +104,11 @@ class BuilderResult : public runtime::ObjectRef {
   /*!
    * \brief Constructor of BuilderResult.
    * \param artifact_path The path to the built artifact.
+   * \param extra_info Extra information about the build.
    * \param error_msg The error message if any.
    */
-  TVM_DLL explicit BuilderResult(Optional<String> artifact_path, Optional<String> error_msg);
+  TVM_DLL explicit BuilderResult(Optional<String> artifact_path,
+                                 Optional<Array<Integer>> extra_info, Optional<String> error_msg);
   TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(BuilderResult, runtime::ObjectRef, BuilderResultNode);
 };
 

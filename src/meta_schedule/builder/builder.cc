@@ -32,9 +32,11 @@ BuilderInput::BuilderInput(IRModule mod, Target target,
   data_ = std::move(n);
 }
 
-BuilderResult::BuilderResult(Optional<String> artifact_path, Optional<String> error_msg) {
+BuilderResult::BuilderResult(Optional<String> artifact_path, Optional<Array<Integer>> extra_info,
+                             Optional<String> error_msg) {
   ObjectPtr<BuilderResultNode> n = make_object<BuilderResultNode>();
   n->artifact_path = std::move(artifact_path);
+  n->extra_info = std::move(extra_info);
   n->error_msg = std::move(error_msg);
   data_ = std::move(n);
 }
@@ -65,9 +67,9 @@ TVM_FFI_REGISTER_GLOBAL("meta_schedule.BuilderInput")
     });
 
 TVM_FFI_REGISTER_GLOBAL("meta_schedule.BuilderResult")
-    .set_body_typed([](Optional<String> artifact_path,
+    .set_body_typed([](Optional<String> artifact_path, Optional<Array<Integer>> extra_info,
                        Optional<String> error_msg) -> BuilderResult {
-      return BuilderResult(artifact_path, error_msg);
+      return BuilderResult(artifact_path, extra_info, error_msg);
     });
 
 TVM_FFI_REGISTER_GLOBAL("meta_schedule.BuilderBuild").set_body_method(&BuilderNode::Build);
