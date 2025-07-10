@@ -108,7 +108,7 @@ def default_tir_pipeline():
         if bool(config.get("tir.ptx_ldg32", False)):
             passes.append(tir.transform.InjectPTXLDG32())
         if bool(config.get("tir.merge_launch_thread", False)):
-            passes.append(tir.transform.MergeLaunchThreadPass())
+            passes.append(tir.transform.MergeLaunchThread())
         if bool(config.get("tir.use_block_sync", False)):
             passes.append(tir.transform.ThreadBlockSync())
         passes.extend(

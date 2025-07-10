@@ -484,8 +484,12 @@ def ThreadBlockSync():
     return _ffi_api.ThreadBlockSync()  # type: ignore
 
 
-def MergeLaunchThreadPass():
-    return _ffi_api.MergeLaunchThreadPass()  # type: ignore
+def MergeLaunchThread():
+    return _ffi_api.MergeLaunchThread()  # type: ignore
+
+
+def MarkMergeCandidate():
+    return _ffi_api.MarkMergeCandidate()  # type: ignore
 
 
 def InferFragment():

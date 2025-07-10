@@ -33,6 +33,8 @@ namespace tir {
 
 using support::StartsWith;
 
+constexpr const char* merge_candidate_key = "merge_candidate";
+
 class ThreadInfoCollector : public StmtVisitor {
  public:
   bool has_multiple_block_idx{false};
@@ -43,7 +45,12 @@ class ThreadInfoCollector : public StmtVisitor {
  private:
   // Visit the AttrStmt nodes to collect thread extent information.
   void VisitStmt_(const AttrStmtNode* op) override {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == merge_candidate_key) {
+      in_merge_scope_ = true;
+      this->VisitStmt(op->body);
+      in_merge_scope_ = false;
+    }
+    if (in_merge_scope_ && op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (StartsWith(iv->thread_tag, "blockIdx.")) {
         if (!sum_block_extent.defined()) {
@@ -65,15 +72,22 @@ class ThreadInfoCollector : public StmtVisitor {
     }
     StmtVisitor::VisitStmt_(op);
   }
+  bool in_merge_scope_{false};
 };
 
-class MergeLaunchThread : public StmtExprMutator {
+class LaunchThreadMerger : public StmtExprMutator {
  public:
-  explicit MergeLaunchThread(const ThreadInfoCollector& collector) : collector_(collector) {}
+  explicit LaunchThreadMerger(const ThreadInfoCollector& collector) : collector_(collector) {}
 
  private:
   Stmt VisitStmt_(const AttrStmtNode* op) override {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == merge_candidate_key) {
+      in_merge_scope_ = true;
+      Stmt body = this->VisitStmt(op->body);
+      in_merge_scope_ = false;
+      return body;
+    }
+    if (in_merge_scope_ && op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (StartsWith(iv->thread_tag, "blockIdx.")) {
         if (!collector_.has_multiple_block_idx) {
@@ -103,7 +117,7 @@ class MergeLaunchThread : public StmtExprMutator {
           // If all threadIdx variables have the same extent, we can keep it as is.
           return StmtExprMutator::VisitStmt_(op);
         }
-        // If then else has been placed by InjectDivergentThreadSync,
+        // "If-then-else" has been placed by InjectDivergentThreadSync,
         // we need to adjust the body to use the max_thread_extent.
         auto body = this->VisitStmt(op->body);
         // Create a new IterVar with the max_thread_extent.
@@ -120,51 +134,40 @@ class MergeLaunchThread : public StmtExprMutator {
 
   Stmt VisitStmt_(const SeqStmtNode* op) override {
     // in my use case, top level is SeqStmt { AttrStmt, AttrStmt }
-    // check if all attr statements are adjacent to each other
-    int first_attr_idx = -1;
-    int last_attr_idx = -1;
+    std::vector<size_t> merge_candidate_indices;
     for (size_t i = 0; i < op->seq.size(); ++i) {
       if (const auto* attr_stmt = op->seq[i].as<AttrStmtNode>()) {
-        if (attr_stmt->attr_key == tir::attr::thread_extent &&
-            StartsWith(Downcast<IterVar>(attr_stmt->node)->thread_tag, "blockIdx.")) {
-          if (first_attr_idx == -1) {
-            first_attr_idx = i;
-          }
-          last_attr_idx = i;
+        if (attr_stmt->attr_key == merge_candidate_key) {
+          merge_candidate_indices.push_back(i);
         }
       }
     }
-
-    bool all_adjacent = false;
-    if (first_attr_idx != -1 && last_attr_idx != -1) {
-      all_adjacent = true;
-      for (int i = first_attr_idx; i <= last_attr_idx; ++i) {
-        if (const auto* attr_stmt = op->seq[i].as<AttrStmtNode>()) {
-          if (attr_stmt->attr_key != tir::attr::thread_extent ||
-              !StartsWith(Downcast<IterVar>(attr_stmt->node)->thread_tag, "blockIdx.")) {
-            all_adjacent = false;
-            break;
-          }
-        } else {
-          all_adjacent = false;
-          break;
-        }
-      }
-    }
-
-    if (!all_adjacent) {
+    if (merge_candidate_indices.empty()) {
+      // No merge candidates found, just visit the statements.
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    // If all attr statements are adjacent, we can merge them.
+    // If there are multiple merge candidates, we need to merge them.
     Array<Stmt> new_seq;
-    for (int i = 0; i < first_attr_idx; ++i) {
+    // before merge start
+    for (size_t i = 0; i < merge_candidate_indices[0]; ++i) {
       new_seq.push_back(this->VisitStmt(op->seq[i]));
     }
 
     Array<Stmt> merged_attrs_body;
     AttrStmt first_attr_stmt;
-    for (int i = first_attr_idx; i <= last_attr_idx; ++i) {
+    for (auto i : merge_candidate_indices) {
+      auto merge_attr_stmt = op->seq[i].as<AttrStmtNode>();
+      ICHECK(merge_attr_stmt) << "Expected AttrStmtNode, but got: " << op->seq[i];
+      ICHECK(merge_attr_stmt->attr_key == merge_candidate_key)
+          << "Expected attr_key to be '" << merge_candidate_key
+          << "', but got: " << merge_attr_stmt->attr_key;
+      auto block_idx_stmt = merge_attr_stmt->body.as<AttrStmtNode>();
+      ICHECK(block_idx_stmt) << "Expected body to be an AttrStmtNode, but got: "
+                             << merge_attr_stmt->body;
+      ICHECK(block_idx_stmt->attr_key == tir::attr::thread_extent &&
+             StartsWith(Downcast<IterVar>(block_idx_stmt->node)->thread_tag, "blockIdx."))
+          << "Expected thread extent attribute for blockIdx, but got: " << block_idx_stmt->attr_key;
       Stmt stmt = this->VisitStmt(op->seq[i]);
       auto attr_stmt = stmt.as<AttrStmtNode>();
       ICHECK(attr_stmt);
@@ -181,8 +184,14 @@ class MergeLaunchThread : public StmtExprMutator {
     new_seq.push_back(
         AttrStmt(first_attr_stmt->node, first_attr_stmt->attr_key, first_attr_stmt->value,
                  SeqStmt(merged_attrs_body, first_attr_stmt->span), first_attr_stmt->span));
-
-    for (size_t i = last_attr_idx + 1; i < op->seq.size(); ++i) {
+    // after merge end
+    // risk: if indices are not continuous, order may be wrong
+    std::unordered_set<size_t> merge_candidate_set(merge_candidate_indices.begin(),
+                                                   merge_candidate_indices.end());
+    for (size_t i = 0; i < op->seq.size(); ++i) {
+      if (merge_candidate_set.count(i)) {
+        continue;
+      }
       new_seq.push_back(this->VisitStmt(op->seq[i]));
     }
 
@@ -190,6 +199,9 @@ class MergeLaunchThread : public StmtExprMutator {
   }
 
   PrimExpr VisitExpr_(const VarNode* op) override {
+    if (!in_merge_scope_) {
+      return StmtExprMutator::VisitExpr_(op);
+    }
     Var var = GetRef<Var>(op);
     if (StartsWith(var->name_hint, "blockIdx.") && block_idx_var_.defined()) {
       return block_idx_var_->var - current_extent_;
@@ -203,6 +215,7 @@ class MergeLaunchThread : public StmtExprMutator {
   IterVar block_idx_var_{nullptr};
   IterVar thread_idx_var_{nullptr};
   const ThreadInfoCollector collector_;
+  bool in_merge_scope_{false};
 };
 
 class SyncCounter : public StmtVisitor {
@@ -239,7 +252,13 @@ class SyncCounter : public StmtVisitor {
 class InjectDivergentThreadSync : public StmtExprMutator {
  private:
   Stmt VisitStmt_(const AttrStmtNode* op) override {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == merge_candidate_key) {
+      in_merge_scope_ = true;
+      Stmt body = this->VisitStmt(op->body);
+      in_merge_scope_ = false;
+      return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
+    }
+    if (in_merge_scope_ && op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       // Only for 1-dim blockIdx
       if (iv->thread_tag == "blockIdx.x") {
@@ -262,11 +281,31 @@ class InjectDivergentThreadSync : public StmtExprMutator {
   }
 
   SyncCounter sync_counter_;
+  bool in_merge_scope_{false};
+};
+
+class CandidateMarker : public StmtExprMutator {
+ private:
+  Stmt VisitStmt_(const ForNode* op) override {
+    if (has_marked_) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    if (op->kind == ForKind::kThreadBinding) {
+      auto iv = Downcast<IterVar>(op->thread_binding);
+      if (iv->thread_tag == "blockIdx.x") {
+        has_marked_ = true;
+        auto body = StmtExprMutator::VisitStmt_(op);
+        return AttrStmt(PrimExpr(0), merge_candidate_key, Integer(0), body, op->span);
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+  bool has_marked_{false};
 };
 
 namespace transform {
 
-Pass MergeLaunchThreadPass() {
+Pass MergeLaunchThread() {
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
     auto* n = f.CopyOnWrite();
     // inject thread sync for divergent threads
@@ -276,15 +315,25 @@ Pass MergeLaunchThreadPass() {
     // and threadIdx into a single one
     ThreadInfoCollector collector;
     collector(n->body);
-    n->body = MergeLaunchThread(collector)(std::move(n->body));
+    n->body = LaunchThreadMerger(collector)(std::move(n->body));
     return f;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tir.MergeLaunchThreadPass", {});
+  return CreatePrimFuncPass(pass_func, 0, "tir.MergeLaunchThread", {});
 }
 
-TVM_FFI_REGISTER_GLOBAL("tir.transform.MergeLaunchThreadPass")
-    .set_body_typed(MergeLaunchThreadPass);
+TVM_FFI_REGISTER_GLOBAL("tir.transform.MergeLaunchThread").set_body_typed(MergeLaunchThread);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.merge_launch_thread", Bool);
+
+Pass MarkMergeCandidate() {
+  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+    auto* n = f.CopyOnWrite();
+    n->body = CandidateMarker()(std::move(n->body));
+    return f;
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tir.MarkMergeCandidate", {});
+}
+
+TVM_FFI_REGISTER_GLOBAL("tir.transform.MarkMergeCandidate").set_body_typed(MarkMergeCandidate);
 
 }  // namespace transform
 
