@@ -177,6 +177,7 @@ runtime::Module BuildCUDA(IRModule mod, Target target) {
 
   // extrac blocks and threads
   for (auto& [name, info] : func_info) {
+    if (name != "main_kernel") continue;  // only main_kernel is considered
     if (!info.launch_param_tags.empty() && !info.launch_args.empty()) {
       ICHECK_EQ(info.launch_param_tags.size(), info.launch_args.size())
           << "Mismatch between launch_param_tags and launch_args for function: " << name;

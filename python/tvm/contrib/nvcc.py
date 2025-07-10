@@ -189,11 +189,11 @@ def compile_cuda(code, target_format=None, arch=None, options=None, path_target=
 
     if show_resource_usage:
         out_str = py_str(out)
-        # If there are multiple kernels, the first one will be extracted.
-        reg_match = re.search(r"(\d+) registers", out_str)
-        reg = int(reg_match.group(1)) if reg_match else 0
-        smem_match = re.search(r"(\d+) bytes smem", out_str)
-        smem = int(smem_match.group(1)) if smem_match else 0
+        # If there are multiple kernels, the first one will be extracted. (last one in the output)
+        reg_match = re.findall(r"(\d+) registers", out_str)
+        reg = int(reg_match[-1]) if reg_match else 0
+        smem_match = re.findall(r"(\d+) bytes smem", out_str)
+        smem = int(smem_match[-1]) if smem_match else 0
         # print(f"nvcc compilation finished, registers: {reg}, smem: {smem}")
 
     with open(file_target, "rb") as f:
