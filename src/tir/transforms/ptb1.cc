@@ -35,12 +35,25 @@ using support::StartsWith;
 
 constexpr const char* merge_candidate_key = "merge_candidate";
 
+int convert_to_int(const PrimExpr& expr) {
+  if (!expr.defined()) {
+    return 0;
+  }
+  auto analyzer = arith::Analyzer();
+  auto simp = analyzer.Simplify(expr);
+  const int64_t* pint = tir::as_const_int(simp);
+  if (pint) {
+    return static_cast<int>(*pint);
+  }
+  return 0;
+}
+
 class ThreadInfoCollector : public StmtVisitor {
  public:
-  bool has_multiple_block_idx{false};
-  PrimExpr sum_block_extent{nullptr};
-  bool has_different_thread_idx{false};
-  PrimExpr max_thread_extent{nullptr};
+  bool has_multiple_block_idx_{false};
+  bool has_different_thread_idx_{false};
+  int get_block_sum_extent() const { return convert_to_int(block_sum_extent_); }
+  int get_thread_max_extent() const { return convert_to_int(thread_max_extent_); }
 
  private:
   // Visit the AttrStmt nodes to collect thread extent information.
@@ -53,25 +66,28 @@ class ThreadInfoCollector : public StmtVisitor {
     if (in_merge_scope_ && op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (StartsWith(iv->thread_tag, "blockIdx.")) {
-        if (!sum_block_extent.defined()) {
-          sum_block_extent = op->value;
+        if (!block_sum_extent_.defined()) {
+          block_sum_extent_ = op->value;
         } else {
-          has_multiple_block_idx = true;
-          sum_block_extent = sum_block_extent + op->value;
+          has_multiple_block_idx_ = true;
+          block_sum_extent_ = block_sum_extent_ + op->value;
         }
       } else if (StartsWith(iv->thread_tag, "threadIdx.")) {
-        if (!max_thread_extent.defined()) {
-          max_thread_extent = op->value;
+        if (!thread_max_extent_.defined()) {
+          thread_max_extent_ = op->value;
         } else {
-          if (!max_thread_extent.same_as(op->value)) {
-            has_different_thread_idx = true;
-            max_thread_extent = tvm::max(max_thread_extent, op->value);
+          if (!thread_max_extent_.same_as(op->value)) {
+            has_different_thread_idx_ = true;
+            thread_max_extent_ = tvm::max(thread_max_extent_, op->value);
           }
         }
       }
     }
     StmtVisitor::VisitStmt_(op);
   }
+
+  PrimExpr block_sum_extent_{nullptr};
+  PrimExpr thread_max_extent_{nullptr};
   bool in_merge_scope_{false};
 };
 
@@ -90,7 +106,7 @@ class LaunchThreadMerger : public StmtExprMutator {
     if (in_merge_scope_ && op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (StartsWith(iv->thread_tag, "blockIdx.")) {
-        if (!collector_.has_multiple_block_idx) {
+        if (!collector_.has_multiple_block_idx_) {
           // If there is only one blockIdx, we can keep it as is.
           return StmtExprMutator::VisitStmt_(op);
         }
@@ -100,20 +116,20 @@ class LaunchThreadMerger : public StmtExprMutator {
         // All blockIdx variables should be merged into a single one.
         if (!block_idx_var_.defined()) {
           // Do all range start at 0?
-          block_idx_var_ = IterVar(Range::FromMinExtent(0, collector_.sum_block_extent), iv->var,
-                                   iv->iter_type, iv->thread_tag, iv->span);
+          block_idx_var_ = IterVar(Range::FromMinExtent(0, collector_.get_block_sum_extent()),
+                                   iv->var, iv->iter_type, iv->thread_tag, iv->span);
         }
 
         auto body = this->VisitStmt(op->body);
         auto start_extent = current_extent_;
-        current_extent_ += op->value;
+        current_extent_ += convert_to_int(op->value);
         return AttrStmt(
-            block_idx_var_, op->attr_key, collector_.sum_block_extent,
+            block_idx_var_, op->attr_key, collector_.get_block_sum_extent(),
             IfThenElse(And(GE(block_idx_var_, start_extent), LT(block_idx_var_, current_extent_)),
                        body),
             op->span);
       } else if (StartsWith(iv->thread_tag, "threadIdx.")) {
-        if (!collector_.has_different_thread_idx) {
+        if (!collector_.has_different_thread_idx_) {
           // If all threadIdx variables have the same extent, we can keep it as is.
           return StmtExprMutator::VisitStmt_(op);
         }
@@ -122,10 +138,10 @@ class LaunchThreadMerger : public StmtExprMutator {
         auto body = this->VisitStmt(op->body);
         // Create a new IterVar with the max_thread_extent.
         if (!thread_idx_var_.defined()) {
-          thread_idx_var_ = IterVar(Range::FromMinExtent(0, collector_.max_thread_extent), iv->var,
-                                    iv->iter_type, iv->thread_tag, iv->span);
+          thread_idx_var_ = IterVar(Range::FromMinExtent(0, collector_.get_thread_max_extent()),
+                                    iv->var, iv->iter_type, iv->thread_tag, iv->span);
         }
-        return AttrStmt(thread_idx_var_, op->attr_key, collector_.max_thread_extent, body,
+        return AttrStmt(thread_idx_var_, op->attr_key, collector_.get_thread_max_extent(), body,
                         op->span);
       }
     }
@@ -171,9 +187,10 @@ class LaunchThreadMerger : public StmtExprMutator {
       Stmt stmt = this->VisitStmt(op->seq[i]);
       auto attr_stmt = stmt.as<AttrStmtNode>();
       ICHECK(attr_stmt);
+      auto analyzer = arith::Analyzer();
       ICHECK(attr_stmt->attr_key == tir::attr::thread_extent &&
              StartsWith(Downcast<IterVar>(attr_stmt->node)->thread_tag, "blockIdx.") &&
-             attr_stmt->value.same_as(collector_.sum_block_extent));
+             analyzer.CanProveEqual(attr_stmt->value, collector_.get_block_sum_extent()));
       auto body = attr_stmt->body;
       if (merged_attrs_body.empty()) {
         // keep one of the AttrStmt
@@ -211,7 +228,7 @@ class LaunchThreadMerger : public StmtExprMutator {
     return StmtExprMutator::VisitExpr_(op);
   }
 
-  PrimExpr current_extent_{0};
+  int current_extent_{0};
   IterVar block_idx_var_{nullptr};
   IterVar thread_idx_var_{nullptr};
   const ThreadInfoCollector collector_;
