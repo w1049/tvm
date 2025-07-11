@@ -235,7 +235,13 @@ def _worker_func(
     from tvm import transform
 
     with transform.PassContext(
-        opt_level=3, config={"tir.merge_static_smem": True, "cuda.show_resource_usage": True}
+        opt_level=3,
+        config={
+            "tir.use_block_sync": True,
+            "tir.merge_launch_thread": True,
+            "tir.merge_static_smem": True,
+            "cuda.show_resource_usage": True,
+        },
     ):
         rt_mod: Module = f_build(mod, target, _deserialize_params(params))
     # Step 2. Export the Module
