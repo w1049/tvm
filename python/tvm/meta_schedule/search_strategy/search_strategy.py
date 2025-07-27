@@ -188,12 +188,15 @@ class SearchStrategy(Object):
         """Create a search strategy."""
         from . import (  # pylint: disable=import-outside-toplevel
             EvolutionarySearch,
+            MySearch,
             ReplayFunc,
             ReplayTrace,
         )
 
         if kind == "evolutionary":
             return EvolutionarySearch(*args, **kwargs)
+        if kind == "my":
+            return MySearch(*args, **kwargs)
         if kind == "replay-trace":
             return ReplayTrace(*args, **kwargs)
         if kind == "replay-func":
