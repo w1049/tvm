@@ -366,11 +366,16 @@ class PopenPoolExecutor:
         self._maximum_process_uses = maximum_process_uses
         self._stdout = stdout
         self._stderr = stderr
+        self._shutdown = False
 
         if self._initializer is not None and not callable(self._initializer):
             raise TypeError("initializer must be callable for PopenPoolExecutor")
 
     def __del__(self):
+        if not self._shutdown:
+            self.shutdown(wait=True)
+
+    def shutdown(self, wait=True):
         self._lock.acquire()
         for worker in self._worker_map.values():
             try:
@@ -378,7 +383,8 @@ class PopenPoolExecutor:
             except ImportError:
                 pass
         self._lock.release()
-        self._threadpool.shutdown()
+        self._threadpool.shutdown(wait=wait)
+        self._shutdown = True
 
     def _worker_run(self, fn, args, kwargs):
         """Internal thread runner."""
