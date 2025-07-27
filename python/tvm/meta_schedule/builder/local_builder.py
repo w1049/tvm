@@ -251,7 +251,10 @@ def _worker_func(
     # Step 3. Get the extra info from the Module
     info = rt_mod.imported_modules[0].get_source().splitlines()[0]
     if info.startswith("// "):
-        extra_info = [int(x) for x in info[3:].split(" ")]
+        try:
+            extra_info = [int(x) for x in info[3:].split(" ")]
+        except ValueError:
+            extra_info = None
     else:
         extra_info = None
     return artifact_path, extra_info

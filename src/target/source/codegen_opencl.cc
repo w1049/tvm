@@ -669,7 +669,29 @@ runtime::Module BuildOpenCL(IRModule mod, Target target) {
     code << fsource;
   }
 
-  return OpenCLModuleCreate(code.str(), "cl", ExtractFuncInfo(mod), code.str());
+  auto func_info = ExtractFuncInfo(mod);
+
+  int blocks = 1, threads = 1;
+  // extrac blocks and threads
+  for (auto& [name, info] : func_info) {
+    if (name != "main_kernel") continue;  // only main_kernel is considered
+    if (!info.launch_param_tags.empty() && !info.launch_args.empty()) {
+      ICHECK_EQ(info.launch_param_tags.size(), info.launch_args.size())
+          << "Mismatch between launch_param_tags and launch_args for function: " << name;
+      for (size_t i = 0; i < info.launch_param_tags.size(); ++i) {
+        runtime::ThreadScope thread_scope = runtime::ThreadScope::Create(info.launch_param_tags[i]);
+        if (thread_scope.rank == 0) {
+          blocks *= info.launch_args[i];
+        } else if (thread_scope.rank == 1) {
+          threads *= info.launch_args[i];
+        }
+      }
+    }
+  }
+  int reg = 0, smem = 0;
+  auto str_code = "// " + std::to_string(blocks) + " " + std::to_string(threads) + " " +
+                  std::to_string(reg) + " " + std::to_string(smem) + "\n" + code.str();
+  return OpenCLModuleCreate(str_code, "cl", func_info, str_code);
 }
 
 TVM_FFI_REGISTER_GLOBAL("target.build.opencl").set_body_typed(BuildOpenCL);
