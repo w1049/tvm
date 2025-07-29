@@ -39,6 +39,7 @@ from ..database import JSONDatabase
 from ..feature_extractor import FeatureExtractor, PerStoreFeature
 from ..logging import get_logger
 from ..runner import RunnerResult
+from ..builder import BuilderResult
 from ..search_strategy import MeasureCandidate
 from ..tune_context import TuneContext
 from ..utils import derived_object, shash2hex
@@ -979,6 +980,7 @@ class MLPModel(PyCostModel):
         context: TuneContext,
         candidates: List[MeasureCandidate],
         results: List[RunnerResult],
+        _builder_results: List[BuilderResult] = [],
     ) -> None:
         """Update the dataset, re-train the cost model if not frozen.
 
@@ -996,7 +998,9 @@ class MLPModel(PyCostModel):
         )
         self.trainer.update(features, mean_costs, shash2hex(context.mod))
 
-    def predict(self, context: TuneContext, candidates: List[MeasureCandidate]) -> np.ndarray:
+    def predict(
+        self, context: TuneContext, candidates: List[MeasureCandidate], _nobjs: int = 1
+    ) -> np.ndarray:
         """Predict given the measure candidates.
 
         Parameters

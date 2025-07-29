@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple, Union
 
 from ..cost_model import PyCostModel
 from ..runner import RunnerResult
+from ..builder import BuilderResult
 from ..search_strategy import MeasureCandidate
 from ..tune_context import TuneContext
 from ..utils import derived_object  # type: ignore
@@ -95,6 +96,7 @@ class RandomModel(PyCostModel):
         context: TuneContext,
         candidates: List[MeasureCandidate],
         results: List[RunnerResult],
+        _builder_results: List[BuilderResult] = [],
     ) -> None:
         """Update the cost model given running results.
 
@@ -109,7 +111,7 @@ class RandomModel(PyCostModel):
         """
 
     def predict(
-        self, context: TuneContext, candidates: List[MeasureCandidate]
+        self, context: TuneContext, candidates: List[MeasureCandidate], _nobjs: int = 1
     ) -> np.ndarray:  # type: ignore # pylint: disable=used-before-assignment
         """Update the cost model given running results.
 

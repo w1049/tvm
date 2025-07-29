@@ -31,6 +31,7 @@ from ..cost_model import PyCostModel
 from ..feature_extractor import FeatureExtractor
 from ..logging import get_logger
 from ..runner import RunnerResult
+from ..builder import BuilderResult
 from ..search_strategy import MeasureCandidate
 from ..utils import cpu_count, derived_object, shash2hex
 from .metric import max_curve
@@ -463,6 +464,7 @@ class XGBModel(PyCostModel):
         context: "TuneContext",
         candidates: List[MeasureCandidate],
         results: List[RunnerResult],
+        _builder_results: List[BuilderResult] = [],
     ) -> None:
         """Update the cost model given running results.
 
@@ -474,6 +476,8 @@ class XGBModel(PyCostModel):
             The measure candidates.
         results : List[RunnerResult]
             The running results of the measure candidates.
+        builder_results : List[BuilderResult]
+            The builder results of the measure candidates, which contain additional information.
         """
         assert len(candidates) == len(results)
         if len(candidates) == 0:
@@ -553,6 +557,7 @@ class XGBModel(PyCostModel):
         self,
         context: "TuneContext",
         candidates: List[MeasureCandidate],
+        _nobjs: int = 1,
     ) -> np.ndarray:
         """Predict the normalized score using the cost model.
 
@@ -562,6 +567,8 @@ class XGBModel(PyCostModel):
             The tuning context.
         candidates : List[MeasureCandidate]
             The measure candidates.
+        nobjs : int
+            The number of objectives to predict.
 
         Return
         ------

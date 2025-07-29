@@ -61,18 +61,22 @@ class CostModelNode : public runtime::Object {
    * \param context The tuning context.
    * \param candidates The measure candidates.
    * \param results The running results of the measure candidates.
+   * \param builder_results The builder results of the measure candidates, which contain additional
+   * information.
    */
   virtual void Update(const TuneContext& context, const Array<MeasureCandidate>& candidates,
-                      const Array<RunnerResult>& results) = 0;
+                      const Array<RunnerResult>& results,
+                      const Array<BuilderResult>& builder_results) = 0;
 
   /*!
    * \brief Predict the normalized score (the larger the better) of given measure candidates.
    * \param context The tuning context.
    * \param candidates The measure candidates.
+   * \param nobjs The number of objectives to predict.
    * \return The predicted normalized score.
    */
   virtual std::vector<double> Predict(const TuneContext& context,
-                                      const Array<MeasureCandidate>& candidates) = 0;
+                                      const Array<MeasureCandidate>& candidates, int nobjs = 1) = 0;
 
   static constexpr const char* _type_key = "meta_schedule.CostModel";
   TVM_DECLARE_BASE_OBJECT_INFO(CostModelNode, Object);
@@ -96,18 +100,21 @@ class PyCostModelNode : public CostModelNode {
    * \param context The tuning context.
    * \param candidates The measure candidates.
    * \param results The running results of the measure candidates.
+   * \param builder_results The builder results of the measure candidates, which contain additional
+   * information.
    * \return Whether cost model was updated successfully.
    */
   using FUpdate = ffi::TypedFunction<void(const TuneContext&, const Array<MeasureCandidate>&,
-                                          const Array<RunnerResult>&)>;
+                                          const Array<RunnerResult>&, const Array<BuilderResult>&)>;
   /*!
    * \brief Predict the running results of given measure candidates.
    * \param context The tuning context.
    * \param candidates The measure candidates.
+   * \param nobjs The number of objectives to predict.
    * \param p_addr The address to save the estimated running results.
    */
-  using FPredict =
-      ffi::TypedFunction<void(const TuneContext&, const Array<MeasureCandidate>&, void* p_addr)>;
+  using FPredict = ffi::TypedFunction<void(const TuneContext&, const Array<MeasureCandidate>&,
+                                           int nobjs, void* p_addr)>;
   /*!
    * \brief Get the cost model as string with name.
    * \return The string representation of the cost model.
@@ -128,9 +135,9 @@ class PyCostModelNode : public CostModelNode {
   void Load(const String& path);
   void Save(const String& path);
   void Update(const TuneContext& context, const Array<MeasureCandidate>& candidates,
-              const Array<RunnerResult>& results);
-  std::vector<double> Predict(const TuneContext& context,
-                              const Array<MeasureCandidate>& candidates);
+              const Array<RunnerResult>& results, const Array<BuilderResult>& builder_results);
+  std::vector<double> Predict(const TuneContext& context, const Array<MeasureCandidate>& candidates,
+                              int nobjs);
 
   static constexpr const char* _type_key = "meta_schedule.PyCostModel";
   TVM_DECLARE_FINAL_OBJECT_INFO(PyCostModelNode, CostModelNode);

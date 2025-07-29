@@ -39,6 +39,7 @@ class UpdateCostModelNode : public MeasureCallbackNode {
     int n = builder_results.size();
     Array<MeasureCandidate> pruned_candidate;
     Array<RunnerResult> pruned_runner_result;
+    Array<BuilderResult> pruned_builder_result;
     pruned_candidate.reserve(n);
     pruned_runner_result.reserve(n);
     for (int i = 0; i < n; i++) {
@@ -48,9 +49,10 @@ class UpdateCostModelNode : public MeasureCallbackNode {
             Sum(runner_results[i]->run_secs.value()) > 0))) {
         pruned_candidate.push_back(measure_candidates[i]);
         pruned_runner_result.push_back(runner_results[i]);
+        pruned_builder_result.push_back(builder_results[i]);
       }
     }
-    cost_model->Update(task->ctx, pruned_candidate, pruned_runner_result);
+    cost_model->Update(task->ctx, pruned_candidate, pruned_runner_result, pruned_builder_result);
   }
 
   static constexpr const char* _type_key = "meta_schedule.UpdateCostModel";

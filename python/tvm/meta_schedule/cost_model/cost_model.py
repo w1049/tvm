@@ -29,6 +29,7 @@ from tvm.runtime import Object
 
 from .. import _ffi_api
 from ..runner import RunnerResult
+from ..builder import BuilderResult
 from ..search_strategy import MeasureCandidate
 from ..tune_context import TuneContext
 from ..utils import _get_default_str
@@ -65,6 +66,7 @@ class CostModel(Object):
         context: TuneContext,
         candidates: List[MeasureCandidate],
         results: List[RunnerResult],
+        builder_results: List[BuilderResult],
     ) -> None:
         """Update the cost model given running results.
 
@@ -76,10 +78,14 @@ class CostModel(Object):
             The measure candidates.
         results : List[RunnerResult]
             The running results of the measure candidates.
+        builder_results : List[BuilderResult]
+            The builder results of the measure candidates, which contain additional information.
         """
-        _ffi_api.CostModelUpdate(self, context, candidates, results)  # type: ignore # pylint: disable=no-member
+        _ffi_api.CostModelUpdate(self, context, candidates, results, builder_results)  # type: ignore # pylint: disable=no-member
 
-    def predict(self, context: TuneContext, candidates: List[MeasureCandidate]) -> np.ndarray:
+    def predict(
+        self, context: TuneContext, candidates: List[MeasureCandidate], nobjs: int
+    ) -> np.ndarray:
         """Predict normalized score with the cost model.
 
         Parameters
@@ -88,6 +94,8 @@ class CostModel(Object):
             The tuning context.
         candidates : List[MeasureCandidate]
             The measure candidates.
+        nobjs : int
+            The number of objectives to predict.
 
         Return
         ------
@@ -95,7 +103,7 @@ class CostModel(Object):
             The predicted normalized score.
         """
         n = len(candidates)
-        results = np.zeros(shape=(n,), dtype="float64")
+        results = np.zeros(shape=(n * nobjs,), dtype="float64")
         _ffi_api.CostModelPredict(  # type: ignore # pylint: disable=no-member
             self,
             context,
@@ -169,10 +177,12 @@ class _PyCostModel(CostModel):
     ):
         """Constructor."""
 
-        def f_predict(context: TuneContext, candidates: List[MeasureCandidate], return_ptr) -> None:
+        def f_predict(
+            context: TuneContext, candidates: List[MeasureCandidate], nobjs: int, return_ptr
+        ) -> None:
             n = len(candidates)
             return_ptr = ctypes.cast(return_ptr, ctypes.POINTER(ctypes.c_double))
-            array_wrapper = np.ctypeslib.as_array(return_ptr, shape=(n,))
+            array_wrapper = np.ctypeslib.as_array(return_ptr, shape=(n * nobjs,))
             res = predict_func(context, candidates)
             array_wrapper[:] = res
             assert (
@@ -227,6 +237,7 @@ class PyCostModel:
         context: TuneContext,
         candidates: List[MeasureCandidate],
         results: List[RunnerResult],
+        builder_results: List[BuilderResult],
     ) -> None:
         """Update the cost model given running results.
 
@@ -238,10 +249,14 @@ class PyCostModel:
             The measure candidates.
         results : List[RunnerResult]
             The running results of the measure candidates.
+        builder_results : List[BuilderResult]
+            The builder results of the measure candidates, which contain additional information.
         """
         raise NotImplementedError
 
-    def predict(self, context: TuneContext, candidates: List[MeasureCandidate]) -> np.ndarray:
+    def predict(
+        self, context: TuneContext, candidates: List[MeasureCandidate], nobjs: int
+    ) -> np.ndarray:
         """Predict given the measure candidates.
 
         Parameters
@@ -250,6 +265,8 @@ class PyCostModel:
             The tuning context.
         candidates : List[MeasureCandidate]
             The measure candidates.
+        nobjs : int
+            The number of objectives to predict.
 
         Return
         ------
