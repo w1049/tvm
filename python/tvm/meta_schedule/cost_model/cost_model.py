@@ -39,7 +39,7 @@ from ..utils import _get_default_str
 class CostModel(Object):
     """Cost model."""
 
-    CostModelType = Union["CostModel", Literal["xgb", "mlp", "random"]]
+    CostModelType = Union["CostModel", Literal["xgb", "mlp", "random", "xgb-multi"]]
 
     def load(self, path: str) -> None:
         """Load the cost model from given file location.
@@ -114,7 +114,7 @@ class CostModel(Object):
 
     @staticmethod
     def create(
-        kind: Literal["xgb", "mlp", "random", "none"],
+        kind: Literal["xgb", "mlp", "random", "xgb-multi", "none"],
         *args,
         **kwargs,
     ) -> "CostModel":
@@ -122,18 +122,20 @@ class CostModel(Object):
 
         Parameters
         ----------
-        kind : Literal["xgb", "mlp", "random", "none"]
-            The kind of the cost model. Can be "xgb", "mlp", "random" or "none".
+        kind : Literal["xgb", "mlp", "random", "xgb-multi", "none"]
+            The kind of the cost model. Can be "xgb", "mlp", "random", "xgb-multi" or "none".
 
         Returns
         -------
         cost_model : CostModel
             The created cost model.
         """
-        from . import RandomModel, XGBModel  # pylint: disable=import-outside-toplevel
+        from . import RandomModel, XGBModel, XGBMultiModel  # pylint: disable=import-outside-toplevel
 
         if kind == "xgb":
             return XGBModel(*args, **kwargs)  # type: ignore
+        if kind == "xgb-multi":
+            return XGBMultiModel(*args, **kwargs)  # type: ignore
 
         # params only relevant to XGBModel
         _xgb_params = ["num_tuning_cores", "tree_method"]
@@ -183,7 +185,7 @@ class _PyCostModel(CostModel):
             n = len(candidates)
             return_ptr = ctypes.cast(return_ptr, ctypes.POINTER(ctypes.c_double))
             array_wrapper = np.ctypeslib.as_array(return_ptr, shape=(n * nobjs,))
-            res = predict_func(context, candidates)
+            res = predict_func(context, candidates, nobjs)
             array_wrapper[:] = res
             assert (
                 array_wrapper.dtype == "float64"

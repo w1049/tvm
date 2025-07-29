@@ -231,10 +231,10 @@ Array<MeasureCandidate> MyAssembleCandidates(const std::vector<Schedule>& picks)
  */
 std::vector<double> MyPredictNormalizedScore(const std::vector<Schedule>& candidates,
                                              const TuneContext& context,
-                                             const CostModel& cost_model) {
+                                             const CostModel& cost_model, int nobjs) {
   auto _ = Profiler::TimedScope("MySearch/Evolve/MyPredictNormalizedScore");
   ICHECK(!candidates.empty()) << "Candidates given for score prediction can not be empty list!";
-  std::vector<double> scores = cost_model->Predict(context, MyAssembleCandidates(candidates));
+  std::vector<double> scores = cost_model->Predict(context, MyAssembleCandidates(candidates), nobjs);
   for (double& score : scores) {
     score = std::max(0.0, score);
   }
@@ -275,6 +275,8 @@ class MySearchNode : public SearchStrategyNode {
     CostModel cost_model_{nullptr};
     /*! \brief The token registered for the given workload in database. */
     Workload token_{nullptr};
+    /*! \brief The number of objectives. */
+    int nobjs_{5};
 
     explicit State(MySearchNode* self, int max_trials, int num_trials_per_iter,
                    Array<Schedule> design_space_schedules, Database database, CostModel cost_model)
@@ -546,7 +548,8 @@ std::vector<Schedule> MySearchNode::State::EvolveWithCostModel(std::vector<Sched
   for (int iter = 0;; ++iter) {
     // Predict normalized score with the cost model,
     std::vector<double> scores =
-        MyPredictNormalizedScore(population, GetRef<TuneContext>(self->ctx_), this->cost_model_);
+        MyPredictNormalizedScore(population, GetRef<TuneContext>(self->ctx_), this->cost_model_, 
+                                 this->nobjs_);
 
     {
       auto _ = Profiler::TimedScope("MySearch/Evolve/Misc");
