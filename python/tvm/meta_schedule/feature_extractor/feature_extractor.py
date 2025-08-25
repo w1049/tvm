@@ -36,7 +36,7 @@ from ..utils import _get_default_str
 class FeatureExtractor(Object):
     """Extractor for features from measure candidates for use in cost model."""
 
-    FeatureExtractorType = Union[Literal["per-store-feature"], "FeatureExtractor"]
+    FeatureExtractorType = Union[Literal["per-store-feature", "gpu-resource-feature"], "FeatureExtractor"]
 
     def extract_from(
         self, context: TuneContext, candidates: List[MeasureCandidate]
@@ -62,15 +62,17 @@ class FeatureExtractor(Object):
 
     @staticmethod
     def create(
-        kind: Literal["per-store-feature"],
+        kind: Literal["per-store-feature", "gpu-resource-feature"],
         *args,
         **kwargs,
     ) -> "FeatureExtractor":
         """Create a CostModel."""
-        from . import PerStoreFeature  # pylint: disable=import-outside-toplevel
+        from . import PerStoreFeature, GPUResourceFeature  # pylint: disable=import-outside-toplevel
 
         if kind == "per-store-feature":
             return PerStoreFeature(*args, **kwargs)  # type: ignore
+        elif kind == "gpu-resource-feature":
+            return GPUResourceFeature(*args, **kwargs)  # type: ignore
         raise ValueError(f"Unknown CostModel: {kind}")
 
 

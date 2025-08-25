@@ -120,6 +120,11 @@ class FeatureExtractor : public runtime::ObjectRef {
   TVM_DLL static FeatureExtractor PyFeatureExtractor(
       PyFeatureExtractorNode::FExtractFrom f_extract_from,
       PyFeatureExtractorNode::FAsString f_as_string);
+  /*!
+   * \brief Create a GPU resource feature extractor
+   * \return The feature extractor created
+   */
+  TVM_DLL static FeatureExtractor GPUResourceFeature();
   TVM_DEFINE_MUTABLE_OBJECT_REF_METHODS(FeatureExtractor, ObjectRef, FeatureExtractorNode);
 };
 
