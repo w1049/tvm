@@ -117,9 +117,12 @@ bool ProducerCoversConsumer(const Array<PrimExpr>& buffer_shape,
                                        analyzer->Simplify(produced.max()));
     consumed = arith::IntSet::Interval(analyzer->Simplify(consumed.min()),
                                        analyzer->Simplify(consumed.max()));
+    bool a = produced.min().same_as(arith::neg_inf()) || consumed.min().same_as(arith::pos_inf()) ||
+             analyzer->CanProve(analyzer->canonical_simplify(produced.min() - consumed.min()) <= 0);
+    bool b = consumed.max().same_as(arith::neg_inf()) || produced.max().same_as(arith::pos_inf()) ||
+             analyzer->CanProve(analyzer->canonical_simplify(consumed.max() - produced.max()) <= 0);
 
-    if (!analyzer->CanProve((analyzer->canonical_simplify(produced.min() - consumed.min()) <= 0) &&
-                            (analyzer->canonical_simplify(consumed.max() - produced.max()) <= 0))) {
+    if (!(a && b)) {
       return false;
     }
   }

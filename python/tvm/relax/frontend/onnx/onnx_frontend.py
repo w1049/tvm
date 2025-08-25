@@ -389,6 +389,17 @@ class Div(BinaryBase):
 
     @classmethod
     def _impl_v7(cls, bb, inputs, attr, params):
+        all_int = True
+        for inp in inputs:
+            if isinstance(inp, relax.Constant):
+                if not inp.struct_info.dtype.startswith("int"):
+                    all_int = False
+            elif isinstance(inp, relax.PrimValue):
+                if not inp.value.dtype.startswith("int"):
+                    all_int = False
+        if all_int:
+            cls.numpy_op = _np.floor_divide
+            cls.relax_op = relax.op.floor_divide
         return cls.base_impl(bb, inputs, attr, params)
 
 
@@ -944,6 +955,13 @@ class Reshape(OnnxOpConverter):
 
         if isinstance(data, relax.ShapeExpr) and isinstance(new_shape, relax.Constant):
             new_shape = new_shape.data.numpy().tolist()
+            if len(new_shape) == 2 and new_shape[0] == -1:
+                ll = 1
+                for l in data.values:
+                    if l != 0:
+                        ll *= l
+                new_shape[0] = ll // new_shape[1]
+                return relax.ShapeExpr(new_shape)
             if new_shape != [-1]:
                 raise NotImplementedError("Need to fix this case")
             return data
@@ -1351,6 +1369,8 @@ class Squeeze(OnnxOpConverter):
     def _impl_v13(cls, bb, inputs, attr, params):
         data = inputs[0]
         axis = get_constant(inputs[1], params)
+        if axis is None:
+            axis = attr.get("axes", None)
         if isinstance(axis, relax.Constant):
             axis = tuple([int(x) for x in axis.data.numpy()])
 
@@ -1918,7 +1938,10 @@ class Expand(OnnxOpConverter):
             new_shape = shape.data.numpy().tolist()
             # ONNX Expand operator requires preserving target rank and broadcasting
             # according to standard rules. Dimensions are right-aligned.
-            data_shape = [dim.value for dim in data.struct_info.shape]
+            data_shape = [
+                dim.value if not isinstance(data.struct_info.shape[0], tir.SizeVar) else dim
+                for dim in data.struct_info.shape
+            ]
 
             # Right-align the shapes
             if len(new_shape) > len(data_shape):
@@ -1928,7 +1951,7 @@ class Expand(OnnxOpConverter):
             # Fix small target shapes - if target dim is smaller than input dim
             # use the input dim (ONNX-specific behavior).
             for i in range(len(new_shape)):
-                if new_shape[i] < data_shape[i]:
+                if isinstance(data_shape[i], tir.SizeVar) or new_shape[i] < data_shape[i]:
                     new_shape[i] = data_shape[i]
             return relax.op.broadcast_to(data, relax.ShapeExpr(new_shape))
 
@@ -3141,15 +3164,11 @@ class DepthToSpace(OnnxOpConverter):
         mode = attr.get("mode", b"DCR").decode("utf-8")
         b, c, h, w = inputs[0].struct_info.shape
         if mode == "DCR":
-            x = relax.op.reshape(
-                inputs[0], (b, block_size, block_size, c // (block_size**2), h, w)
-            )
+            x = relax.op.reshape(inputs[0], (b, block_size, block_size, c // (block_size**2), h, w))
             x = relax.op.permute_dims(x, [0, 3, 4, 1, 5, 2])
             return relax.op.reshape(x, (b, c // (block_size**2), h * block_size, w * block_size))
         elif mode == "CRD":
-            x = relax.op.reshape(
-                inputs[0], (b, c // (block_size**2), block_size, block_size, h, w)
-            )
+            x = relax.op.reshape(inputs[0], (b, c // (block_size**2), block_size, block_size, h, w))
             x = relax.op.permute_dims(x, [0, 1, 4, 2, 5, 3])
             return relax.op.reshape(x, (b, c // (block_size**2), h * block_size, w * block_size))
         else:

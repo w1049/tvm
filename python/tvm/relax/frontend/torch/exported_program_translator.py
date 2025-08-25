@@ -331,6 +331,13 @@ class ExportedProgramImporter(BaseFXGraphImporter):
 
     ########## Others ##########
 
+    def _max_dim(self, node: fx.Node) -> relax.Var:
+        args = self.retrieve_args(node)
+        x = args[0]
+        dim = args[1] if len(node.args) > 1 else node.kwargs.get("dim", None)
+        keepdim = args[2] if len(node.args) > 2 else node.kwargs.get("keepdim", False)
+        return self.block_builder.emit(relax.op.max(x, dim, keepdims=keepdim))
+
     def create_convert_map(
         self,
     ) -> Dict[str, Callable[[fx.Node], relax.Var]]:
@@ -497,6 +504,7 @@ class ExportedProgramImporter(BaseFXGraphImporter):
             "upsample_nearest2d.vec": self._upsample_nearest2d,
             "upsample_bicubic2d.vec": self._upsample_bicubic2d,
             # statistical
+            "max.dim": self._max_dim,
             "mean.dim": self._mean,
             "prod.default": self._prod,
             "std.correction": self._std,
@@ -551,6 +559,7 @@ class ExportedProgramImporter(BaseFXGraphImporter):
             "view.default": self._reshape,
             "reshape.default": self._reshape,
             "reshape_as.default": self._reshape_as,
+            "scatter.src": self._scatter,
             # tensor creation
             "_to_copy.default": self._to_copy,
             "arange.default": self._arange,

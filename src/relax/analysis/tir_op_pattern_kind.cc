@@ -73,6 +73,12 @@ class PatternKindAnalyzer : public StmtExprVisitor {
       StmtVisitor::VisitStmt(op->body);
       return;
     }
+    // Skip the block if it is a T_split_sections block.
+    // avoid error in swin transformer.
+    if (op->name_hint == "T_split_sections") {
+      kind_ = kOpaque;
+      return;
+    }
 
     // Step 1. Clear loads and store
     loads_.clear();
