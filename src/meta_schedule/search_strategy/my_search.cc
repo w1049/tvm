@@ -31,6 +31,18 @@ namespace meta_schedule {
 
 using tir::Schedule;
 
+struct DirectMappingHash {
+  std::size_t operator()(const std::tuple<int, int, int>& key) const {
+    const auto& [x, y, z] = key;
+    return ((x - 1) * 32 + (y - 1)) * 32 + (z - 1);
+  }
+};
+
+using ConfigHashTable = std::unordered_map<std::tuple<int, int, int>, int, DirectMappingHash>;
+
+ConfigHashTable createConfigHashTable();
+int getGroupId(const ConfigHashTable& hashTable, int x, int y, int z);
+
 /**************** Data Structure ****************/
 
 /*! \brief An auxiliary data structure to help deduplicate IRModules */
@@ -109,6 +121,264 @@ class SizedHeap {
   int size_limit;
   /*! \brief The heap, the worse the topper */
   std::vector<Item> heap;
+};
+
+/*!
+ * \brief Map-Elites grid for maintaining Pareto front in each cell
+ */
+template <class T>
+class MapElitesGrid {
+ public:
+  struct GridItem {
+    T sch;
+    std::vector<double> objectives;  // First 2 dimensions as objectives
+    std::vector<double> behaviors;   // Last 3 dimensions as behaviors
+    int grid_id;
+    double crowding_distance;  // Precomputed crowding distance
+
+    GridItem(T sch, const std::vector<double>& scores, int grid_id)
+        : sch(sch), grid_id(grid_id), crowding_distance(0.0) {
+      CHECK_GE(scores.size(), 5) << "Expected at least 5 scores (nobjs=5)";
+      objectives = {scores[0], scores[1]};            // First 2 as objectives
+      behaviors = {scores[2], scores[3], scores[4]};  // Last 3 as behaviors
+    }
+  };
+
+  /*! \brief Map from grid_id to Pareto front (list of non-dominated solutions) */
+  std::unordered_map<int, std::vector<GridItem>> grid_cells_;
+  /*! \brief Config hash table for grid mapping */
+  ConfigHashTable config_table_;
+  /*! \brief Number of non-empty cells */
+  int num_occupied_cells_ = 0;
+
+  explicit MapElitesGrid() : config_table_(createConfigHashTable()) {}
+
+  /*!
+   * \brief Check if solution1 dominates solution2 (for minimization)
+   * \param obj1 Objectives of solution 1
+   * \param obj2 Objectives of solution 2
+   * \return True if solution1 dominates solution2
+   */
+  bool Dominates(const std::vector<double>& obj1, const std::vector<double>& obj2) const {
+    CHECK_EQ(obj1.size(), obj2.size());
+    bool at_least_one_better = false;
+    for (size_t i = 0; i < obj1.size(); ++i) {
+      if (obj1[i] > obj2[i]) return false;  // obj1 is worse in dimension i
+      if (obj1[i] < obj2[i]) at_least_one_better = true;
+    }
+    return at_least_one_better;
+  }
+
+  /*!
+   * \brief Add a solution to the grid, maintaining Pareto front
+   * \param sch The schedule
+   * \param scores All 5 scores (first 2 objectives, last 3 behaviors)
+   */
+  void AddSolution(T sch, const std::vector<double>& scores) {
+    CHECK_EQ(scores.size(), 5) << "Expected exactly 5 scores";
+
+    std::vector<double> behaviors = {scores[2], scores[3], scores[4]};
+
+    int thread = std::clamp(int(std::round(behaviors[0])), 1, 1024);
+    int reg = std::clamp(int(std::round(behaviors[1])), 1, 255);
+    int smem = std::clamp(int(std::round(behaviors[2])), 0, 49152);
+
+    auto occRoundUp = [](int value, int multiple) -> int {
+      return ((value + multiple - 1) / multiple) * multiple;
+    };
+
+    int x = static_cast<int>(std::ceil(reg / 8.0));
+    int y = static_cast<int>(std::ceil(thread / 32.0));
+    int z = std::min(167936 / occRoundUp(smem + 1024, 128), 16);
+
+    int grid_id = getGroupId(config_table_, x, y, z);
+
+    if (grid_id == -1) {
+      // return;
+      grid_id = 1000;  // Fallback to a default grid ID
+    }
+
+    GridItem new_item(sch, scores, grid_id);
+
+    auto& cell = grid_cells_[grid_id];
+    if (cell.empty()) {
+      num_occupied_cells_++;
+    }
+
+    // Check if new solution is dominated by existing ones
+    bool is_dominated = false;
+    for (const auto& existing : cell) {
+      if (Dominates(existing.objectives, new_item.objectives)) {
+        is_dominated = true;
+        break;
+      }
+    }
+
+    if (is_dominated) return;  // Don't add dominated solution
+
+    // Remove solutions dominated by the new one
+    cell.erase(std::remove_if(cell.begin(), cell.end(),
+                              [&](const GridItem& existing) {
+                                return Dominates(new_item.objectives, existing.objectives);
+                              }),
+               cell.end());
+
+    // Add the new solution
+    cell.push_back(new_item);
+  }
+
+  /*!
+   * \brief Calculate Manhattan distance between two solutions in objective space
+   * \param obj1 Objectives of solution 1
+   * \param obj2 Objectives of solution 2
+   * \return Manhattan distance
+   */
+  double ManhattanDistance(const std::vector<double>& obj1, const std::vector<double>& obj2) const {
+    CHECK_EQ(obj1.size(), obj2.size());
+    double dist = 0.0;
+    for (size_t i = 0; i < obj1.size(); ++i) {
+      dist += std::abs(obj1[i] - obj2[i]);
+    }
+    return dist;
+  }
+
+  /*!
+   * \brief Compute crowding distances for all solutions in all cells
+   */
+  void ComputeCrowdingDistances() {
+    for (auto& kv : grid_cells_) {
+      auto& cell = kv.second;
+      if (cell.empty()) continue;
+
+      // Reset all crowding distances
+      for (auto& item : cell) {
+        item.crowding_distance = 0.0;
+      }
+
+      // For single solution, assign maximum distance
+      if (cell.size() == 1) {
+        cell[0].crowding_distance = 99999;
+        continue;
+      }
+
+      // For each solution, compute crowding distance
+      for (size_t i = 0; i < cell.size(); ++i) {
+        std::vector<double> distances;
+
+        // Find distances to all other solutions in the same cell
+        for (size_t j = 0; j < cell.size(); ++j) {
+          if (i != j) {
+            double dist = ManhattanDistance(cell[i].objectives, cell[j].objectives);
+            distances.push_back(dist);
+          }
+        }
+
+        if (distances.empty()) {
+          cell[i].crowding_distance = 99999;
+        } else {
+          // Sort distances to find nearest neighbors
+          std::sort(distances.begin(), distances.end());
+
+          // For boundary solutions (single nearest neighbor distance)
+          // For internal solutions (average of two nearest neighbors)
+          if (distances.size() == 1) {
+            cell[i].crowding_distance = distances[0];
+          } else {
+            // Use average of two nearest neighbors, or single nearest if at boundary
+            cell[i].crowding_distance = (distances[0] + distances[1]) / 2.0;
+          }
+
+          // Add small epsilon to avoid zero distances
+          cell[i].crowding_distance = std::max(cell[i].crowding_distance, 1e-10);
+        }
+      }
+    }
+  }
+
+  /*!
+   * \brief Get all schedules and their sampling weights for mutation
+   * \return Pair of (schedules vector, weights vector)
+   */
+  std::pair<std::vector<T>, std::vector<double>> GetSchedulesAndWeights() {
+    ComputeCrowdingDistances();
+
+    std::vector<T> schedules;
+    std::vector<double> weights;
+
+    // Collect all schedules with uniform cell weighting and crowding distance weighting within
+    // cells
+    for (const auto& kv : grid_cells_) {
+      const auto& cell = kv.second;
+      if (cell.empty()) continue;
+      double max_time_score = 0.0;
+      double sum_crowding_distance = 0.0;
+      for (const auto& item : cell) {
+        max_time_score = std::max(max_time_score, item.objectives[0]);
+        sum_crowding_distance += item.crowding_distance;
+      }
+
+      for (const auto& item : cell) {
+        schedules.push_back(item.sch);
+        // first, use max_time_score to select a cell
+        // then, use crowding distance to weight within the cell
+        weights.push_back(max_time_score * item.crowding_distance / sum_crowding_distance);
+      }
+    }
+
+    return std::make_pair(schedules, weights);
+  }
+
+  /*!
+   * \brief Sample a schedule from the grid for diversity (uniform across cells)
+   * \param rand_state Random state for sampling
+   * \return Sampled schedule, or nullptr if grid is empty
+   */
+  T SampleForDiversity(TRandState* rand_state) const {
+    if (num_occupied_cells_ == 0) return T{nullptr};
+
+    // First, collect all non-empty cells
+    std::vector<int> occupied_cells;
+    for (const auto& kv : grid_cells_) {
+      if (!kv.second.empty()) {
+        occupied_cells.push_back(kv.first);
+      }
+    }
+    // Sample a cell uniformly
+    int cell_idx = tir::SampleInt(rand_state, 0, occupied_cells.size());
+    int selected_cell = occupied_cells[cell_idx];
+
+    // Sample an individual from the cell uniformly
+    const auto& cell = grid_cells_.at(selected_cell);
+    int item_idx = tir::SampleInt(rand_state, 0, cell.size());
+    return cell[item_idx].sch;
+  }
+
+  /*!
+   * \brief Get all schedules from the grid (for building initial population)
+   * \param max_count Maximum number of schedules to return
+   * \return Vector of schedules
+   */
+  std::vector<T> GetAllSchedules(int max_count = -1) const {
+    std::vector<T> results;
+    for (const auto& kv : grid_cells_) {
+      for (const auto& item : kv.second) {
+        results.push_back(item.sch);
+        if (max_count > 0 && static_cast<int>(results.size()) >= max_count) {
+          return results;
+        }
+      }
+    }
+    return results;
+  }
+
+  /*! \brief Get number of solutions in the grid */
+  size_t Size() const {
+    size_t total = 0;
+    for (const auto& kv : grid_cells_) {
+      total += kv.second.size();
+    }
+    return total;
+  }
 };
 
 struct PerThreadData {
@@ -223,21 +493,31 @@ Array<MeasureCandidate> MyAssembleCandidates(const std::vector<Schedule>& picks)
 }
 
 /*!
- * \brief Predict the normalized score of each candidate.
+ * \brief Predict the score of each candidate.
  * \param candidates The candidates for prediction
  * \param task The search task
  * \param space The search space
- * \return The normalized score in the prediction
+ * \return The score in the prediction
  */
-std::vector<double> MyPredictNormalizedScore(const std::vector<Schedule>& candidates,
-                                             const TuneContext& context,
-                                             const CostModel& cost_model, int nobjs) {
-  auto _ = Profiler::TimedScope("MySearch/Evolve/MyPredictNormalizedScore");
+std::vector<std::vector<double>> MyPredictScore(const std::vector<Schedule>& candidates,
+                                                const TuneContext& context,
+                                                const CostModel& cost_model, int nobjs) {
+  auto _ = Profiler::TimedScope("MySearch/Evolve/MyPredictScore");
   ICHECK(!candidates.empty()) << "Candidates given for score prediction can not be empty list!";
-  std::vector<double> scores = cost_model->Predict(context, MyAssembleCandidates(candidates), nobjs);
-  for (double& score : scores) {
-    score = std::max(0.0, score);
+  std::vector<double> flat_scores =
+      cost_model->Predict(context, MyAssembleCandidates(candidates), nobjs);
+
+  // Reshape flat scores to matrix form: [num_candidates, nobjs]
+  int num_candidates = candidates.size();
+  std::vector<std::vector<double>> scores(num_candidates, std::vector<double>(nobjs));
+
+  for (int i = 0; i < num_candidates; i++) {
+    for (int j = 0; j < nobjs; j++) {
+      double score = flat_scores[i * nobjs + j];
+      scores[i][j] = std::max(0.0, score);
+    }
   }
+
   return scores;
 }
 
@@ -472,12 +752,27 @@ class MySearchNode : public SearchStrategyNode {
 
 std::vector<Schedule> MySearchNode::State::PickBestFromDatabase(int num) {
   auto _ = Profiler::TimedScope("MySearch/PickBestFromDatabase");
-  std::vector<tir::Trace> measured_traces;
-  measured_traces.reserve(num);
-  Array<TuningRecord> top_records = this->database_->GetTopK(this->token_, num);
-  for (TuningRecord record : top_records) {
-    measured_traces.push_back(record->trace);
+
+  Array<TuningRecord> all_records = this->database_->GetTopK(this->token_, 2147483647);
+  MapElitesGrid<tir::Trace> map_elites_grid;
+  for (TuningRecord record : all_records) {
+    std::vector<double> scores(5);
+    if (record->run_secs.defined() && !record->run_secs.value().empty()) {
+      scores[0] = record->run_secs.value()[0]->value;
+      if (record->extra_info.defined() && record->extra_info.value().size() >= 4) {
+        auto extra_info = record->extra_info.value();
+        for (int i = 1; i < 5; ++i) {
+          scores[i] = static_cast<double>(extra_info[i - 1]->value);
+        }
+      }
+    }
+    map_elites_grid.AddSolution(record->trace, scores);
   }
+  TVM_PY_LOG(INFO, self->ctx_->logger)
+      << "Built Map-Elites grid with " << map_elites_grid.Size() << " solutions across "
+      << map_elites_grid.num_occupied_cells_ << " cells";
+
+  auto measured_traces = map_elites_grid.GetAllSchedules(num);
   int actual_num = measured_traces.size();
   ThreadedTraceApply pp(self->postprocs_);
   std::vector<Schedule> results(actual_num, Schedule{nullptr});
@@ -544,39 +839,49 @@ std::vector<Schedule> MySearchNode::State::EvolveWithCostModel(std::vector<Sched
     // The heap to record best schedule, we do not consider schedules that are already measured
     exists = this->measured_workloads_;
   }
+  IRModuleSet in_grid(database_->GetModuleEquality());
   SizedHeap heap(num);
+  MapElitesGrid<Schedule> evolution_grid;
   for (int iter = 0;; ++iter) {
-    // Predict normalized score with the cost model,
-    std::vector<double> scores =
-        MyPredictNormalizedScore(population, GetRef<TuneContext>(self->ctx_), this->cost_model_, 
-                                 this->nobjs_);
-
+    // Predict score with the cost model
+    auto all_scores = MyPredictScore(population, GetRef<TuneContext>(self->ctx_), this->cost_model_,
+                                     this->nobjs_);
     {
       auto _ = Profiler::TimedScope("MySearch/Evolve/Misc");
-      ICHECK_EQ(scores.size(), population.size());
+      ICHECK_EQ(all_scores.size(), population.size());
       for (int i = 0, n = population.size(); i < n; ++i) {
         Schedule sch = population.at(i);
         IRModule mod = sch->mod();
         size_t shash = ModuleHash(mod);
-        double score = scores.at(i);
+        double score = all_scores[i][0];  // First score: time
         if (!exists.Has(mod, shash)) {
           exists.Add(mod, shash);
           heap.Push(sch, score);
+        }
+        if (!in_grid.Has(mod, shash)) {
+          in_grid.Add(mod, shash);
+          evolution_grid.AddSolution(sch, all_scores[i]);
         }
       }
       // Discontinue once it reaches end of search
       if (iter == self->genetic_num_iters) {
         break;
       }
+      // Use the grid to sample the next population
+      auto [grid_population, weights] = evolution_grid.GetSchedulesAndWeights();
+      population = grid_population;
+      TVM_PY_LOG(INFO, self->ctx_->logger)
+          << "Evolve iter #" << iter << " starting... Population size: " << population.size()
+          << ", Grid cells: " << evolution_grid.num_occupied_cells_;
       // Set threaded samplers, with probability from predicated normalized throughput
       for (PerThreadData& data : this->per_thread_data_) {
-        data.Set(scores, self->genetic_mutate_prob, self->mutator_probs_);
+        data.Set(weights, self->genetic_mutate_prob, self->mutator_probs_);
       }
     }
     {
       auto _ = Profiler::TimedScope("MySearch/Evolve/Mutation");
       ThreadedTraceApply pp(self->postprocs_);
-      ConcurrentBitmask cbmask(self->population_size);
+      ConcurrentBitmask cbmask(population.size());
       std::vector<Schedule> next_population(self->population_size, Schedule{nullptr});
       // The worker function
       auto f_find_candidate = [&cbmask, &population, &next_population, &pp, this](int thread_id,
@@ -592,7 +897,7 @@ std::vector<Schedule> MySearchNode::State::EvolveWithCostModel(std::vector<Sched
         // Loop until success
         for (int fail_count = 0; fail_count <= self->genetic_max_fail_count; ++fail_count) {
           sampled_trace_id = trace_sampler();
-          sampled_trace_id = sampled_trace_id % self->population_size;
+          sampled_trace_id = sampled_trace_id % population.size();
           tir::Trace trace = population.at(sampled_trace_id)->trace().value();
           if (Optional<Mutator> opt_mutator = mutator_sampler()) {
             // Decision: mutate
@@ -623,14 +928,59 @@ std::vector<Schedule> MySearchNode::State::EvolveWithCostModel(std::vector<Sched
                                            << pp.SummarizeFailures();
     }
   }
-  // Return the best states from the heap, sorting from higher score to lower ones
+  // Return the best states from the heap and grid, balancing convergence and diversity
   {
     auto _ = Profiler::TimedScope("MySearch/Evolve/Misc");
     std::sort(heap.heap.begin(), heap.heap.end());
+
+    // Balance between heap (convergence) and grid (diversity)
+    double heap_ratio = 0.5;
+    int num_from_heap = static_cast<int>(num * heap_ratio);
+    int num_from_grid = num - num_from_heap;
+
     std::vector<Schedule> results;
     results.reserve(num);
+
+    // First, add best solutions from heap (convergence-focused)
+    int heap_added = 0;
     for (const SizedHeap::Item& item : heap.heap) {
+      if (heap_added >= num_from_heap) break;
       results.push_back(item.sch);
+      heap_added++;
+    }
+
+    // Then, add diverse solutions from evolution grid
+    IRModuleSet result_set(database_->GetModuleEquality());
+    // Mark heap solutions as already added
+    for (const auto& sch : results) {
+      IRModule mod = sch->mod();
+      size_t shash = ModuleHash(mod);
+      result_set.Add(mod, shash);
+    }
+
+    // Sample diverse solutions from grid
+    TRandState temp_rand_state = self->rand_state_;
+    int grid_added = 0;
+    int max_attempts = num_from_grid * 5;  // Try up to 5x to find diverse solutions
+
+    for (int attempt = 0; attempt < max_attempts && grid_added < num_from_grid; ++attempt) {
+      Schedule sampled = evolution_grid.SampleForDiversity(&temp_rand_state);
+      if (sampled.defined()) {
+        IRModule mod = sampled->mod();
+        size_t shash = ModuleHash(mod);
+        if (!result_set.Has(mod, shash)) {
+          result_set.Add(mod, shash);
+          results.push_back(sampled);
+          grid_added++;
+        }
+      }
+    }
+
+    // If we couldn't get enough diverse solutions from grid, fill with remaining heap solutions
+    while (results.size() < static_cast<size_t>(num) &&
+           heap_added < static_cast<int>(heap.heap.size())) {
+      results.push_back(heap.heap[heap_added].sch);
+      heap_added++;
     }
 
     constexpr int kNumScoresPerLine = 16;
@@ -648,7 +998,9 @@ std::vector<Schedule> MySearchNode::State::EvolveWithCostModel(std::vector<Sched
       }
     }
     TVM_PY_LOG(INFO, self->ctx_->logger)
-        << "Scores of the best " << n << " candidates:" << os.str();
+        << "Scores of the best " << n << " candidates:" << os.str() << "\nReturned " << heap_added
+        << " from heap, " << grid_added << " from grid, total " << results.size();
+
     return results;
   }
 }
