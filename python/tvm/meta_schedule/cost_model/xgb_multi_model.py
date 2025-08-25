@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """XGBoost-based cost model"""
+import math
 import os
 import tempfile
 from collections import OrderedDict
@@ -315,8 +316,9 @@ class XGBMultiModel(PyCostModel):
         The number of objectives/models to use (default: 5).
     """
 
-    # feature extractor
-    extractor: FeatureExtractor
+    # feature extractors
+    extractor: FeatureExtractor  # original extractor for time prediction
+    gpu_resource_extractor: FeatureExtractor  # new extractor for block/thread/smem
     # xgboost model config
     config: XGBConfig
     # behavior of randomness
@@ -351,12 +353,22 @@ class XGBMultiModel(PyCostModel):
         num_tuning_cores: Optional[int] = None,
         tree_method: Optional[Literal["auto", "exact", "approx", "hist", "gpu_hist"]] = None,
         nobjs: int = 5,
+        # gpu resource extractor
+        gpu_resource_extractor: Optional[FeatureExtractor.FeatureExtractorType] = None,
     ):
         super().__init__()
         if not isinstance(extractor, FeatureExtractor):
             extractor = FeatureExtractor.create(extractor)
-        # feature extractor
-        self.extractor = extractor
+
+        # Initialize GPU resource extractor if not provided
+        if gpu_resource_extractor is None:
+            gpu_resource_extractor = FeatureExtractor.create("gpu-resource-feature")
+        elif not isinstance(gpu_resource_extractor, FeatureExtractor):
+            gpu_resource_extractor = FeatureExtractor.create(gpu_resource_extractor)
+
+        # feature extractors
+        self.extractor = extractor  # original extractor for time prediction
+        self.gpu_resource_extractor = gpu_resource_extractor  # new extractor for block/thread/smem
         # model-related
         if config.nthread is None:
             # use physical core number
@@ -520,20 +532,43 @@ class XGBMultiModel(PyCostModel):
 
         new_features = [_feature(x) for x in self.extractor.extract_from(context, candidates)]
 
-        # Extract costs for all models
         new_costs_list = []
-        # Model 0: from runner results (existing code)
-        new_costs_list.append([_mean_cost(x) for x in results])
 
-        # Models 1-(nobjs-1): from builder_results.extra_info[0-(nobjs-2)]
-        for extra_idx in range(self.nobjs - 1):
-            new_costs = []
-            for i, result in enumerate(results):
-                if i < len(builder_results):
-                    new_costs.append(_extra_cost(builder_results[i], extra_idx))
-                else:
-                    new_costs.append(1e10)
-            new_costs_list.append(new_costs)
+        # Model 0: from runner results
+        new_costs_list.append([_mean_cost(x) for x in results])
+        # extra info: block, thread, reg, smem
+        # Model 1: block count
+        block_costs = []
+        for i, _ in enumerate(results):
+            if i < len(builder_results):
+                block_costs.append(_extra_cost(builder_results[i], 0))
+            else:
+                block_costs.append(1e10)
+        new_costs_list.append(block_costs)
+        # Model 2: thread count
+        thread_costs = []
+        for i, _ in enumerate(results):
+            if i < len(builder_results):
+                thread_costs.append(_extra_cost(builder_results[i], 1))
+            else:
+                thread_costs.append(1024)
+        new_costs_list.append(thread_costs)
+        # Model 3: register count
+        reg_costs = []
+        for i, _ in enumerate(results):
+            if i < len(builder_results):
+                reg_costs.append(_extra_cost(builder_results[i], 2))
+            else:
+                reg_costs.append(255)  # Default value if no builder result
+        new_costs_list.append(reg_costs)
+        # Model 4: shared memory
+        smem_costs = []
+        for i, _ in enumerate(results):
+            if i < len(builder_results):
+                smem_costs.append(_extra_cost(builder_results[i], 3))
+            else:
+                smem_costs.append(65536)
+        new_costs_list.append(smem_costs)
 
         # Filter instances with no features
         valid_indices = [i for i, f in enumerate(new_features) if len(f) != 0]
@@ -545,15 +580,63 @@ class XGBMultiModel(PyCostModel):
 
         if not new_features:
             return
+        # =====================================
+        from cocompile import calculator_orin
 
+        cost_matrix = np.array(new_costs_arrays).transpose()
+
+        # Calculate maxb for each row using the last three columns
+        maxb_values = []
+        wave_values = []
+        for row in cost_matrix:
+            # Use the last three columns for calculator_orin
+            maxb = calculator_orin(int(row[-3]), int(row[-2]), int(row[-1]))
+            maxb_values.append(maxb)
+            wave = float(row[1]) / (maxb * 16.0) if maxb > 0 else 0
+            wave_values.append(wave)
+
+        # Add maxb column to the cost matrix
+        maxb_array = np.array(maxb_values).reshape(-1, 1)
+        wave_array = np.array(wave_values).reshape(-1, 1)
+        cost_matrix = np.hstack([cost_matrix, maxb_array, wave_array])
+
+        logger.debug("=== ACTUAL RESULTS ===")
+        sorted_indices = np.argsort(cost_matrix[:, 0])
+        sorted_matrix = cost_matrix[sorted_indices]
+        logger.debug("Time  Blocks  Thread  Reg  Smem  MaxB  Wave")
+
+        for i, (original_idx, row) in enumerate(zip(sorted_indices, sorted_matrix)):
+            formatted_row = f"[{row[0]:.6e}  {int(row[1]):>8}  {int(row[2]):>8}  {int(row[3]):>8}  {int(row[4]):>8}  {int(row[5]):>8}  {row[6]:.4f}]"
+            logger.debug(f"Sample {original_idx:2d}: {formatted_row}")
+
+        # Print comparison table
+
+        predict_results = self.predict(context, candidates, nobjs=self.nobjs)
+        predict_matrix = predict_results.reshape(len(candidates), self.nobjs)
+        logger.debug("=== PREDICTION vs ACTUAL COMPARISON ===")
+        logger.debug(
+            "Idx  | Time(pred/actual)  | Blocks(pred/actual)  | Thread(pred/actual)  | Reg(pred/actual)  | Smem(pred/actual)"
+        )
+        for i in range(len(candidates)):
+            pred_row = predict_matrix[i]
+            actual_row = cost_matrix[i]
+            comparison_line = (
+                f"{i:2d}   | "
+                f"{pred_row[0]:.4f}/{actual_row[0]:.6e}  | "
+                f"{int(pred_row[1]):>5}/{int(actual_row[1]):>5}  | "
+                f"{int(pred_row[2]):>5}/{int(actual_row[2]):>5}  | "
+                f"{int(pred_row[3]):>3}/{int(actual_row[3]):>3}  | "
+                f"{int(pred_row[4]):>5}/{int(actual_row[4]):>5}"
+            )
+            logger.debug(comparison_line)
+        # =====================================
         # Steps 3. Run validation
         if group is not None and any(b is not None for b in self.boosters):
             for model_idx in range(self.nobjs):
                 if (
-                    model_idx < len(self.boosters)
+                    model_idx == 0  # Model 0: time prediction
+                    or model_idx == 3  # Model 3: register prediction
                     and self.boosters[model_idx] is not None
-                    and model_idx < len(group.min_costs)
-                    and model_idx < len(new_costs_arrays)
                 ):
                     logger.debug(
                         "XGB model %d validation: %s",
@@ -595,17 +678,20 @@ class XGBMultiModel(PyCostModel):
                 itertools_chain.from_iterable([g.features for g in self.data.values()])
             )
 
-            # Train each model separately
-            for model_idx in range(self.nobjs):
+            # Only train models: Model 0 (time) and Model 3 (reg)
+            for model_idx in [0, 3]:
                 cost_ratio_list = []
                 for g in self.data.values():
                     if model_idx < len(g.min_costs) and model_idx < len(g.costs):
-                        cost_ratio = np.divide(
-                            g.min_costs[model_idx],
-                            g.costs[model_idx],
-                            out=np.zeros_like(g.costs[model_idx]),
-                            where=g.costs[model_idx] != 0,
-                        )
+                        if model_idx == 3:  # reg
+                            cost_ratio = np.ceil(g.costs[model_idx] / 8) / math.ceil(255 / 8)
+                        else:
+                            cost_ratio = np.divide(
+                                g.min_costs[model_idx],
+                                g.costs[model_idx],
+                                out=np.zeros_like(g.costs[model_idx]),
+                                where=g.costs[model_idx] != 0,
+                            )
                         cost_ratio_list.append(cost_ratio)
 
                 if cost_ratio_list:  # Only train if we have data for this model
@@ -632,12 +718,24 @@ class XGBMultiModel(PyCostModel):
         Return
         ------
         result : np.ndarray
-            The predicted normalized scores, shape (n_candidates * nobjs,).
+            The predicted scores, shape (n_candidates * nobjs,).
+            Order: time (normalized 0-1), block (raw count), thread (raw count), reg (raw count), smem (raw bytes).
         """
-        if self.data_size >= self.num_warmup_samples and any(b is not None for b in self.boosters):
-            xs = [
+        if (
+            self.data_size >= self.num_warmup_samples
+        ):  # and any(b is not None for b in self.boosters):
+            # Extract features for time prediction (Model 0)
+            time_features = [
                 x.numpy().astype("float32")
                 for x in self.extractor.extract_from(
+                    context,
+                    candidates,
+                )
+            ]
+
+            gpu_features = [
+                x.numpy().astype("float32")
+                for x in self.gpu_resource_extractor.extract_from(
                     context,
                     candidates,
                 )
@@ -645,11 +743,42 @@ class XGBMultiModel(PyCostModel):
             # Predict with each model and concatenate results
             predictions = []
             for model_idx in range(nobjs):
-                if model_idx < len(self.boosters) and self.boosters[model_idx] is not None:
-                    pred = self._predict_single_model(xs=xs, model_idx=model_idx)
-                else:
-                    # Use random prediction if model is not trained
-                    pred = np.random.uniform(low=0, high=1, size=(len(candidates),))
+                if model_idx < len(self.boosters):
+                    if model_idx == 0:
+                        # Model 0: time prediction - use original features and XGBoost
+                        if self.boosters[model_idx] is not None:
+                            pred = self._predict_single_model(xs=time_features, model_idx=model_idx)
+                        else:
+                            pred = np.random.uniform(low=0, high=1, size=(len(candidates),))
+                    elif model_idx == 1:
+                        # Model 1: block count
+                        if len(gpu_features) > 0 and len(gpu_features[0][0]) >= 7:
+                            pred = self._predict_gpu_resource_model(gpu_features, model_idx)
+                        else:
+                            pred = np.random.uniform(low=1, high=1e10, size=(len(candidates),))
+                    elif model_idx == 2:
+                        # Model 2: thread count
+                        if len(gpu_features) > 0 and len(gpu_features[0][0]) >= 7:
+                            pred = self._predict_gpu_resource_model(gpu_features, model_idx)
+                        else:
+                            pred = np.random.uniform(low=1, high=1024, size=(len(candidates),))
+                    elif model_idx == 3:
+                        # Model 3: register prediction - use original features and XGBoost
+                        if self.boosters[model_idx] is not None:
+                            pred_value = self._predict_single_model(
+                                xs=time_features, model_idx=model_idx
+                            )
+                            pred = np.round(pred_value * math.ceil(255 / 8)) * 8 - 1
+                        else:
+                            pred = np.random.uniform(low=0, high=1, size=(len(candidates),)) * 255
+                    elif model_idx == 4:
+                        # Model 4: shared memory
+                        if len(gpu_features) > 0 and len(gpu_features[0][0]) >= 7:
+                            pred = self._predict_gpu_resource_model(gpu_features, model_idx)
+                        else:
+                            pred = np.random.uniform(low=1, high=65536, size=(len(candidates),))
+                    else:
+                        raise ValueError(f"Invalid model index: {model_idx}")
                 predictions.append(pred)
 
             ret = np.column_stack(predictions)  # Shape: (n_candidates, nobjs)
@@ -708,6 +837,34 @@ class XGBMultiModel(PyCostModel):
         pred = self.boosters[model_idx].predict(d_test.dmatrix)
         ret = d_test.predict_with_score(pred)
         return ret
+
+    def _predict_gpu_resource_model(
+        self,
+        gpu_features: List[np.ndarray],
+        model_idx: int,
+    ) -> np.ndarray:
+        """Predict GPU resource values directly from features"""
+        # Extract raw values from GPU features
+        predictions = []
+        for gpu_feat in gpu_features:
+            if len(gpu_feat[0]) >= 7:
+                block_x, block_y, block_z, thread_x, thread_y, thread_z, smem = gpu_feat[0][:7]
+                if model_idx == 1:  # block
+                    block_count = int(block_x * block_y * block_z)
+                    predictions.append(float(block_count))
+                elif model_idx == 2:  # thread
+                    thread_count = int(thread_x * thread_y * thread_z)
+                    predictions.append(float(thread_count))
+                elif model_idx == 4:  # smem
+                    predictions.append(float(smem))
+                else:
+                    raise ValueError(f"Invalid model index for GPU resource: {model_idx}")
+            else:
+                raise ValueError(
+                    f"GPU feature length {len(gpu_feat)} is less than expected 7 for model {model_idx}"
+                )
+
+        return np.array(predictions)
 
     def _validate(  # type: ignore # pylint: disable=invalid-name
         self,
